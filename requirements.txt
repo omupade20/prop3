@@ -1,0 +1,5 @@
+upstox-python-sdk
+websocket-client
+pandas
+numpy
+requests
