@@ -22,9 +22,9 @@ class HTFBias:
 def get_htf_bias(
     prices: List[float],
     vwap_value: Optional[float] = None,
-    short_period: int = 20,
-    long_period: int = 50,
-    vwap_tolerance: float = 0.006
+    short_period: int = 32,
+    long_period: int = 65,
+    vwap_tolerance: float = 0.009
 ) -> HTFBias:
     """
     Compute an HTF directional bias (direction + confidence).
