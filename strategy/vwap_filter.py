@@ -135,9 +135,9 @@ class VWAPCalculator:
             slope = 0.0
 
         # classify acceptance zone
-        if distance_pct > 0.2:  # price > 0.2% above VWAP
+        if distance_pct > 0.35:  # price > 0.2% above VWAP
             acceptance = "ABOVE"
-        elif distance_pct < -0.2:
+        elif distance_pct < -0.35:
             acceptance = "BELOW"
         else:
             acceptance = "NEAR"
