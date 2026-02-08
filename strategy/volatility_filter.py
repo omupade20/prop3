@@ -72,7 +72,7 @@ def analyze_volatility(
 
     Rules:
     - <0.6 ATR = noise
-    - 0.6–1.1 ATR = building
+    - –1.1 ATR = building
     - 1.1–1.6 ATR = healthy expansion
     - >1.6 ATR = spike / exhaustion risk
     """
@@ -87,7 +87,7 @@ def analyze_volatility(
     # ----------------------
     # 1️⃣ Contracting / Noise
     # ----------------------
-    if move_pct_atr < 0.6:
+    if move_pct_atr < 0.8:
         return VolatilityContext(
             state="CONTRACTING",
             score=-0.6,
@@ -111,7 +111,7 @@ def analyze_volatility(
     # ----------------------
     # 3️⃣ Healthy Expansion
     # ----------------------
-    if move_pct_atr < 1.6:
+    if move_pct_atr < 1.5:
         score = 1.1
         comment = "healthy_expansion"
 
