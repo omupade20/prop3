@@ -1,152 +1,157 @@
-# strategy/breakout_detector.py
-
-from typing import Optional, Dict
-from strategy.volume_filter import volume_spike_confirmed
-from strategy.volatility_filter import compute_atr
-
-
-# =========================
-# Compression Detection
-# =========================
-
-def detect_compression(
-    prices: list[float],
-    lookback: int = 20,
-    compression_ratio: float = 0.65
-) -> bool:
-    """
-    Detect volatility contraction prior to expansion.
-    """
-    if len(prices) < lookback * 2:
-        return False
-
-    recent = prices[-lookback:]
-    previous = prices[-lookback * 2:-lookback]
-
-    recent_range = max(recent) - min(recent)
-    previous_range = max(previous) - min(previous)
-
-    if previous_range <= 0:
-        return False
-
-    return recent_range < previous_range * compression_ratio
+from typing import Optional, Dict, List
+from strategy.sr_levels import compute_sr_levels, get_nearest_sr
+from strategy.volume_filter import analyze_volume
+from strategy.volatility_filter import compute_atr, analyze_volatility
+from strategy.price_action import rejection_info
 
 
-# =========================
-# Breakout / Intent Detector
-# =========================
-
-def breakout_signal(
-    inst_key: str,
-    prices: list[float],
-    volume_history: Optional[list[float]] = None,
-    high_prices: Optional[list[float]] = None,
-    low_prices: Optional[list[float]] = None,
-    close_prices: Optional[list[float]] = None,
-    breakout_pct: float = 0.004,
-    vol_threshold: float = 1.5,
-    atr_multiplier: float = 1.35
+def detect_pullback_signal(
+    prices_1m: List[float],
+    highs_1m: List[float],
+    lows_1m: List[float],
+    closes_1m: List[float],
+    volumes_1m: List[float],
+    highs_5m: List[float],
+    lows_5m: List[float],
+    htf_direction: str,
+    max_proximity: float = 0.025,
+    min_bars: int = 40
 ) -> Optional[Dict]:
     """
-    AUTHORITATIVE Breakout / Intent Detector.
+    CONTINUATION PULLBACK DETECTOR (5m structure + 1m entry)
 
-    Responsibilities:
-    - Detect REAL expansion intent
-    - Classify POTENTIAL vs CONFIRMED
-    - DO NOT decide direction by opinion
+    Structure:
+        - 5m SR defines macro level
+        - 1m defines timing
+        - Requires shallow pullback + resume
     """
 
-    if len(prices) < 30:
+    if len(closes_1m) < min_bars or len(highs_5m) < 20:
         return None
 
-    last_price = prices[-1]
-    prev_price = prices[-2]
+    last_price = closes_1m[-1]
 
-    # ---------------------
-    # Define Reference Range
-    # ---------------------
+    # ==================================================
+    # 1️⃣ 5m STRUCTURE LOCATION
+    # ==================================================
 
-    base = prices[-21:-1]   # last 20 completed bars
-    range_high = max(base)
-    range_low = min(base)
-    range_span = max(range_high - range_low, 1e-9)
+    sr_5m = compute_sr_levels(highs_5m, lows_5m)
+    nearest = get_nearest_sr(last_price, sr_5m, max_search_pct=max_proximity)
 
-    # ---------------------
-    # Direction ONLY from Range Break
-    # ---------------------
+    if not nearest:
+        return None
 
-    direction = None
-    if last_price > range_high:
-        direction = "LONG"
-    elif last_price < range_low:
-        direction = "SHORT"
+    trade_direction = None
+
+    if nearest["type"] == "support" and htf_direction == "BULLISH":
+        trade_direction = "LONG"
+
+    elif nearest["type"] == "resistance" and htf_direction == "BEARISH":
+        trade_direction = "SHORT"
+
     else:
-        # no breakout, no intent
         return None
 
-    # ---------------------
-    # Intent Components
-    # ---------------------
+    # ==================================================
+    # 2️⃣ SHALLOW PULLBACK REQUIREMENT (Continuation logic)
+    # ==================================================
+
+    recent_leg = abs(closes_1m[-1] - closes_1m[-8])
+    atr = compute_atr(highs_1m, lows_1m, closes_1m)
+
+    if not atr or atr <= 0:
+        return None
+
+    # Must NOT be extended
+    if recent_leg > atr * 1.4:
+        return None
+
+    # ==================================================
+    # 3️⃣ 1m PRICE REJECTION AT LEVEL
+    # ==================================================
+
+    last_rej = rejection_info(
+        closes_1m[-2],
+        highs_1m[-1],
+        lows_1m[-1],
+        closes_1m[-1]
+    )
+
+    rejection_ok = False
+
+    if trade_direction == "LONG" and last_rej["rejection_type"] == "BULLISH":
+        rejection_ok = True
+
+    if trade_direction == "SHORT" and last_rej["rejection_type"] == "BEARISH":
+        rejection_ok = True
+
+    # Require some directional resume
+    resume_ok = False
+    if trade_direction == "LONG" and closes_1m[-1] > closes_1m[-3]:
+        resume_ok = True
+    if trade_direction == "SHORT" and closes_1m[-1] < closes_1m[-3]:
+        resume_ok = True
+
+    if not (rejection_ok or resume_ok):
+        return None
+
+    # ==================================================
+    # 4️⃣ VOLUME CONFIRMATION (Stricter)
+    # ==================================================
+
+    vol_ctx = analyze_volume(volumes_1m, close_prices=closes_1m)
+
+    if vol_ctx.score < 0.8:
+        return None
+
+    # ==================================================
+    # 5️⃣ VOLATILITY PHASE FILTER
+    # ==================================================
+
+    volat_ctx = analyze_volatility(
+        current_move=closes_1m[-1] - closes_1m[-2],
+        atr_value=atr
+    )
+
+    if volat_ctx.state not in ["BUILDING", "EXPANDING"]:
+        return None
+
+    # ==================================================
+    # 6️⃣ CONFIDENCE SCORING (More Selective)
+    # ==================================================
 
     components = {
-        "compression": 0.0,
-        "atr_expansion": 0.0,
-        "volume": 0.0
+        "location": 0.0,
+        "rejection": 0.0,
+        "volume": 0.0,
+        "volatility": 0.0
     }
 
-    # Compression (contextual, not mandatory)
-    if detect_compression(prices):
-        components["compression"] = 1.0
+    # Stronger proximity weighting
+    proximity_score = max(0, (max_proximity - nearest["dist_pct"]) * 80)
+    components["location"] = min(proximity_score, 3.0)
 
-    # ATR Expansion (MANDATORY for CONFIRMED)
-    atr_ok = False
-    atr_val = None
-    if high_prices and low_prices and close_prices:
-        atr_val = compute_atr(high_prices, low_prices, close_prices, period=14)
-        if atr_val and abs(last_price - prev_price) >= atr_val * atr_multiplier:
-            atr_ok = True
-            components["atr_expansion"] = 1.5
+    if rejection_ok:
+        components["rejection"] = 2.0
 
-    # Volume Participation (MANDATORY for CONFIRMED)
-    volume_ok = False
-    if volume_history and len(volume_history) >= 20:
-        if volume_spike_confirmed(volume_history, threshold_multiplier=vol_threshold):
-            volume_ok = True
-            components["volume"] = 1.2
+    components["volume"] = min(vol_ctx.score, 2.0)
+    components["volatility"] = min(volat_ctx.score, 1.5)
 
-    # ---------------------
-    # Intent Score (informational only)
-    # ---------------------
+    total_score = sum(components.values())
 
-    intent_score = sum(components.values())
-
-    # ---------------------
-    # Classification Logic
-    # ---------------------
-
-    signal = "POTENTIAL"
-    confirmed = False
-
-    # CONFIRMED requires:
-    # - price outside range
-    # - ATR or Volume confirmation
-    if atr_ok or volume_ok:
-        signal = "CONFIRMED"
-        confirmed = True
-
-    raw_flag = f"{signal}_{direction}"
+    if total_score < 5.5:
+        return None
 
     return {
-        "signal": signal,
-        "direction": direction,
-        "intent_score": round(intent_score, 2),
+        "signal": "CONFIRMED",
+        "direction": trade_direction,
+        "score": round(total_score, 2),
+        "nearest_level": nearest,
         "components": components,
-        "range_high": range_high,
-        "range_low": range_low,
-        "last_price": last_price,
-        "atr": round(atr_val, 6) if atr_val else None,
-        "atr_ok": atr_ok,
-        "volume_ok": volume_ok,
-        "raw_flag": raw_flag,
-        "reason": raw_flag
+        "context": {
+            "volatility": volat_ctx.state,
+            "volume": vol_ctx.strength,
+            "rejection": last_rej["rejection_type"]
+        },
+        "reason": f"CONTINUATION_PULLBACK_{trade_direction}"
     }
