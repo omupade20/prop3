@@ -96,7 +96,7 @@ def detect_market_regime(
         return MarketRegime("RANGE", 0.5, 0.0, 0.0, "indicators unavailable")
 
     # normalized volatility
-    avg_price = sum(closes[-10:]) / min(10, len(closes))
+    avg_price = sum(closes[-24:]) / min(24, len(closes))
     vol_norm = atr / avg_price if avg_price > 0 else 0.0
 
     # =====================
@@ -126,7 +126,7 @@ def detect_market_regime(
         )
 
     # otherwise range
-    strength = max(1.0, adx * 0.1)
+    strength = max(0.5, adx * 0.08)
 
     return MarketRegime(
         state="RANGE",
