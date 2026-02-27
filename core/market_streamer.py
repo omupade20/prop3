@@ -1,5 +1,3 @@
-# core/market_streamer.py
-
 import json
 import datetime
 import upstox_client
@@ -8,6 +6,7 @@ from config.settings import ACCESS_TOKEN
 from strategy.scanner import MarketScanner
 from strategy.vwap_filter import VWAPCalculator
 from strategy.strategy_engine import StrategyEngine
+from strategy.candle_5m_builder import Candle5mBuilder   # ✅ NEW
 
 from execution.execution_engine import ExecutionEngine
 from execution.order_executor import OrderExecutor
@@ -26,7 +25,13 @@ with open("data/nifty500_keys.json", "r") as f:
 scanner = MarketScanner(max_len=600)
 vwap_calculators = {inst: VWAPCalculator() for inst in INSTRUMENT_LIST}
 
-strategy_engine = StrategyEngine(scanner, vwap_calculators)
+candle_5m_builder = Candle5mBuilder()     # ✅ NEW
+
+strategy_engine = StrategyEngine(
+    scanner,
+    vwap_calculators,
+    candle_5m_builder            # ✅ REQUIRED
+)
 
 order_executor = OrderExecutor()
 trade_monitor = TradeMonitor()
@@ -41,6 +46,7 @@ execution_engine = ExecutionEngine(
 )
 
 signals_today = {}
+last_bar_time = {}
 ALLOW_NEW_TRADES = True
 
 
@@ -85,18 +91,58 @@ def start_market_streamer():
                 continue
 
             bar = ohlc[-1]
+
             try:
                 high = float(bar["high"])
                 low = float(bar["low"])
                 close = float(bar["close"])
                 volume = float(bar["vol"])
+                ts = bar["ts"]
             except Exception:
                 continue
 
-            # ---- Update Market State ----
-            scanner.update(inst_key, ltp, high, low, close, volume)
+            prev_ts = last_bar_time.get(inst_key)
+            if prev_ts == ts:
+                continue
 
-            # ---- Strategy Evaluation ----
+            last_bar_time[inst_key] = ts
+
+            dt = datetime.datetime.fromtimestamp(ts / 1000)
+            minute_iso = dt.replace(second=0, microsecond=0).isoformat()
+
+            # ===============================
+            # APPEND CLOSED 1m BAR
+            # ===============================
+            scanner.append_ohlc_bar(
+                inst_key,
+                minute_iso,
+                close,
+                high,
+                low,
+                close,
+                volume
+            )
+
+            # ===============================
+            # BUILD 5m BAR
+            # ===============================
+            candle_5m_closed = candle_5m_builder.update(
+                inst_key,
+                minute_iso,
+                close,
+                high,
+                low,
+                close,
+                volume
+            )
+
+            # only evaluate on 5m close
+            if not candle_5m_closed:
+                continue
+
+            # ===============================
+            # STRATEGY EVALUATION (5m)
+            # ===============================
             decision = strategy_engine.evaluate(inst_key, ltp)
 
             if not decision:
@@ -109,10 +155,12 @@ def start_market_streamer():
                 signals_today[today].add(inst_key)
                 execution_engine.handle_entry(inst_key, decision, ltp)
 
-        # ---- Exit Handling ----
+        # ===============================
+        # EXIT MANAGEMENT
+        # ===============================
         execution_engine.handle_exits(current_prices, now)
 
     streamer.on("message", on_message)
     streamer.connect()
 
-    print("🚀 Elite intraday trading system started (refactored & stable)")
+    print("🚀 5-Min Pullback Trading System LIVE")
