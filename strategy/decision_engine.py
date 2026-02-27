@@ -1,17 +1,9 @@
 from dataclasses import dataclass
 from typing import Optional, Dict
 
-from strategy.volume_filter import analyze_volume
-from strategy.volatility_filter import analyze_volatility, compute_atr
-from strategy.liquidity_filter import analyze_liquidity
-from strategy.price_action import price_action_context
-from strategy.sr_levels import sr_location_score
+from strategy.liquidity_context import analyze_liquidity
 from strategy.vwap_filter import VWAPContext
 
-
-# =========================
-# Output Structure
-# =========================
 
 @dataclass
 class DecisionResult:
@@ -22,15 +14,8 @@ class DecisionResult:
     reason: str
 
 
-# =========================
-# CONTINUATION PULLBACK ENGINE
-# =========================
-
 def final_trade_decision(
     inst_key: str,
-    prices: list[float],
-    highs: list[float],
-    lows: list[float],
     closes: list[float],
     volumes: list[float],
     market_regime: str,
@@ -39,24 +24,32 @@ def final_trade_decision(
     pullback_signal: Optional[Dict],
 ) -> DecisionResult:
 
+    # ==========================================
+    # 1️⃣ STRUCTURE (PULLBACK CORE)
+    # ==========================================
+
     if not pullback_signal:
         return DecisionResult("IGNORE", 0.0, None, {}, "no pullback")
 
     direction = pullback_signal["direction"]
+    pb_score = pullback_signal["score"]
 
-    components: Dict[str, float] = {}
-    score = 0.0
+    # POTENTIAL → PREPARE
+    if pullback_signal["signal"] == "POTENTIAL":
+        return DecisionResult(
+            state=f"PREPARE_{direction}",
+            score=pb_score,
+            direction=direction,
+            components={"pullback": pb_score},
+            reason="potential pullback"
+        )
 
-    # ==================================================
-    # 1️⃣ STRUCTURE (Continuation priority)
-    # ==================================================
+    score = pb_score
+    components = {"pullback": pb_score}
 
-    components["structure"] = 3.8
-    score += 3.8
-
-    # ==================================================
+    # ==========================================
     # 2️⃣ HTF ALIGNMENT
-    # ==================================================
+    # ==========================================
 
     if direction == "LONG" and htf_bias_direction != "BULLISH":
         return DecisionResult("IGNORE", 0.0, None, {}, "htf mismatch")
@@ -64,26 +57,26 @@ def final_trade_decision(
     if direction == "SHORT" and htf_bias_direction != "BEARISH":
         return DecisionResult("IGNORE", 0.0, None, {}, "htf mismatch")
 
-    components["htf"] = 1.6
-    score += 1.6
+    score += 1.0
+    components["htf"] = 1.0
 
-    # ==================================================
+    # ==========================================
     # 3️⃣ MARKET REGIME
-    # ==================================================
+    # ==========================================
 
     if market_regime in ("WEAK", "COMPRESSION"):
         return DecisionResult("IGNORE", 0.0, None, {}, "bad regime")
 
     if market_regime == "EARLY_TREND":
-        components["regime"] = 1.2
-        score += 1.2
+        score += 0.6
+        components["regime"] = 0.6
     elif market_regime == "TRENDING":
-        components["regime"] = 1.6
-        score += 1.6
+        score += 1.0
+        components["regime"] = 1.0
 
-    # ==================================================
-    # 4️⃣ VWAP CONTEXT
-    # ==================================================
+    # ==========================================
+    # 4️⃣ VWAP ENVIRONMENT
+    # ==========================================
 
     if direction == "LONG" and vwap_ctx.acceptance == "BELOW":
         return DecisionResult("IGNORE", 0.0, None, {}, "below vwap")
@@ -91,91 +84,38 @@ def final_trade_decision(
     if direction == "SHORT" and vwap_ctx.acceptance == "ABOVE":
         return DecisionResult("IGNORE", 0.0, None, {}, "above vwap")
 
-    components["vwap"] = vwap_ctx.score
-    score += vwap_ctx.score
+    score += max(0.0, vwap_ctx.score * 0.5)
+    components["vwap"] = round(vwap_ctx.score * 0.5, 2)
 
-    # ==================================================
-    # 5️⃣ VOLUME
-    # ==================================================
+    # ==========================================
+    # 5️⃣ LIQUIDITY SAFETY
+    # ==========================================
 
-    vol_ctx = analyze_volume(volumes, close_prices=closes)
+    liq = analyze_liquidity(volumes)
 
-    if vol_ctx.score < 0.4:
-        return DecisionResult("IGNORE", 0.0, None, {}, "weak volume")
-
-    components["volume"] = vol_ctx.score
-    score += vol_ctx.score
-
-    # ==================================================
-    # 6️⃣ VOLATILITY
-    # ==================================================
-
-    atr = compute_atr(highs, lows, closes)
-    move = closes[-1] - closes[-2] if len(closes) > 1 else 0.0
-
-    volat_ctx = analyze_volatility(move, atr)
-
-    if volat_ctx.state in ["CONTRACTING", "EXHAUSTION"]:
-        return DecisionResult("IGNORE", 0.0, None, {}, "bad volatility")
-
-    components["volatility"] = volat_ctx.score
-    score += volat_ctx.score
-
-    # ==================================================
-    # 7️⃣ LIQUIDITY
-    # ==================================================
-
-    liq_ctx = analyze_liquidity(volumes)
-
-    if liq_ctx.score < 0:
+    if liq.score < 0:
         return DecisionResult("IGNORE", 0.0, None, {}, "illiquid")
 
-    components["liquidity"] = liq_ctx.score
-    score += liq_ctx.score
+    score += min(1.0, liq.score * 0.4)
+    components["liquidity"] = round(liq.score * 0.4, 2)
 
-    # ==================================================
-    # 8️⃣ PRICE ACTION
-    # ==================================================
+    # ==========================================
+    # 6️⃣ FINAL CLASSIFICATION
+    # ==========================================
 
-    pa_ctx = price_action_context(
-        prices=closes,
-        highs=highs,
-        lows=lows,
-        opens=closes,
-        closes=closes
-    )
+    score = round(score, 2)
 
-    components["price_action"] = pa_ctx["score"]
-    score += pa_ctx["score"]
-
-    # ==================================================
-    # 9️⃣ SR LOCATION (5m)
-    # ==================================================
-
-    nearest = pullback_signal.get("nearest_level")
-
-    sr_score = sr_location_score(closes[-1], nearest, direction)
-
-    components["sr"] = sr_score
-    score += sr_score * 1.4
-
-    # ==================================================
-    # 🔟 FINAL DECISION
-    # ==================================================
-
-    score = round(max(min(score, 10.0), 0.0), 2)
-
-    if score >= 6.2:
+    if score >= 6.0:
         state = f"EXECUTE_{direction}"
-        reason = "continuation pullback"
+        reason = "confirmed 5m pullback"
 
-    elif score >= 4.8:
+    elif score >= 4.5:
         state = f"PREPARE_{direction}"
-        reason = "developing continuation"
+        reason = "developing 5m pullback"
 
     else:
         state = "IGNORE"
-        reason = "low edge"
+        reason = "weak setup"
 
     return DecisionResult(
         state=state,
