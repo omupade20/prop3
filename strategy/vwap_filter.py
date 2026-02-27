@@ -111,7 +111,7 @@ class VWAPCalculator:
 
         # slope across recent 5m bars
         if len(self.vwap_history) >= 2:
-            slope = self.vwap_history[-1] - self.vwap_history[0]
+            slope = (self.vwap_history[-1] - self.vwap_history[0]) / max(vwap, 1e-9)
         else:
             slope = 0.0
 
