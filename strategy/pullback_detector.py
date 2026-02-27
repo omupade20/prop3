@@ -51,8 +51,8 @@ def detect_pullback_signal(
     atr = compute_atr(highs, lows, closes)
 
     if atr:
-        recent_swing = abs(closes[-1] - closes[-4])  # ~20min move
-        if recent_swing > atr * 1.8:
+        recent_swing = abs(closes[-1] - closes[-6])  # ~20min move
+        if recent_swing > atr * 2.2:
             return None
 
     # ==================================================
@@ -99,10 +99,10 @@ def detect_pullback_signal(
 
     reaction_ok = False
 
-    if direction == "LONG" and closes[-1] > closes[-2]:
+    if direction == "LONG" and closes[-1] > closes[-3]:
         reaction_ok = True
 
-    if direction == "SHORT" and closes[-1] < closes[-2]:
+    if direction == "SHORT" and closes[-1] < closes[-3]:
         reaction_ok = True
 
     # ==================================================
@@ -118,8 +118,8 @@ def detect_pullback_signal(
     # ==================================================
 
     components = {
-        "location": round(location_score, 2),
-        "rejection": 1.8 if rejection_ok else 0.0,
+        "location": round(location_score, 2.5),
+        "rejection": 1.2 if rejection_ok else 0.0,
         "volume": 0.8 if volume_ok else 0.0,
         "volatility": 1.0 if volat_ctx.state == "EXPANDING" else 0.4,
         "reaction": 0.6 if reaction_ok else 0.0
