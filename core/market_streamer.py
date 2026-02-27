@@ -1,5 +1,3 @@
-# core/market_streamer.py
-
 import json
 import datetime
 import upstox_client
@@ -41,6 +39,7 @@ execution_engine = ExecutionEngine(
 )
 
 signals_today = {}
+last_bar_time = {}   # track last processed minute per instrument
 ALLOW_NEW_TRADES = True
 
 
@@ -85,18 +84,45 @@ def start_market_streamer():
                 continue
 
             bar = ohlc[-1]
+
             try:
                 high = float(bar["high"])
                 low = float(bar["low"])
                 close = float(bar["close"])
                 volume = float(bar["vol"])
+                ts = bar["ts"]   # Upstox timestamp
             except Exception:
                 continue
 
-            # ---- Update Market State ----
-            scanner.update(inst_key, ltp, high, low, close, volume)
+            # ===============================
+            # ONLY PROCESS CLOSED 1m BAR
+            # ===============================
+            prev_ts = last_bar_time.get(inst_key)
 
-            # ---- Strategy Evaluation ----
+            if prev_ts == ts:
+                # same minute still forming → ignore
+                continue
+
+            last_bar_time[inst_key] = ts
+
+            # convert timestamp → ISO minute
+            dt = datetime.datetime.fromtimestamp(ts / 1000)
+            minute_iso = dt.replace(second=0, microsecond=0).isoformat()
+
+            # append CLOSED bar
+            scanner.append_ohlc_bar(
+                inst_key,
+                minute_iso,
+                close,   # open approx (Upstox gives OHLC already aggregated)
+                high,
+                low,
+                close,
+                volume
+            )
+
+            # ===============================
+            # STRATEGY EVALUATION
+            # ===============================
             decision = strategy_engine.evaluate(inst_key, ltp)
 
             if not decision:
@@ -109,10 +135,12 @@ def start_market_streamer():
                 signals_today[today].add(inst_key)
                 execution_engine.handle_entry(inst_key, decision, ltp)
 
-        # ---- Exit Handling ----
+        # ===============================
+        # EXIT MANAGEMENT
+        # ===============================
         execution_engine.handle_exits(current_prices, now)
 
     streamer.on("message", on_message)
     streamer.connect()
 
-    print("🚀 Elite intraday trading system started (refactored & stable)")
+    print("🚀 5-Minute Pullback Trading System LIVE")
