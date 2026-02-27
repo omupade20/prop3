@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Dict
 
-from strategy.liquidity_context import analyze_liquidity
+from strategy.liquidity_filter import analyze_liquidity
 from strategy.vwap_filter import VWAPContext
 
 
