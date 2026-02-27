@@ -1,13 +1,13 @@
 """
 MarketScanner (5-minute native, production-ready).
 
-- keeps rolling 5-minute OHLCV bars per instrument
-- direct OHLC bar ingestion (append_ohlc_bar)
-- snapshot persistence and resume
-- on_bar_close callbacks so strategy can run immediately when a bar closes
-- alert throttling helpers (last_alert_time, dedupe)
-- basic health checks and replay utilities
-- thread-safe for websocket ingestion
+Responsibilities:
+- Store rolling 5-minute OHLCV bars per instrument
+- Provide fast OHLCV access for strategy
+- Trigger callbacks on new 5m bar close
+- Handle alert throttling / dedupe
+- Snapshot save/load
+- Thread-safe for websocket ingestion
 """
 
 import json
@@ -18,8 +18,8 @@ from collections import deque, defaultdict
 from datetime import datetime
 from typing import Dict, List, Callable, Optional
 
-# keep ~3 days of 5m bars (≈ 225 per day)
-DEFAULT_MAX_LEN = 750
+# ~3 trading days of 5m bars (≈ 75 bars/day)
+DEFAULT_MAX_LEN = 300
 
 ISOFMT = "%Y-%m-%dT%H:%M:%S"
 
@@ -29,12 +29,16 @@ def _now_iso():
 
 
 class MarketScanner:
-    def __init__(self, max_len: int = DEFAULT_MAX_LEN, snapshot_path: Optional[str] = None):
+    def __init__(
+        self,
+        max_len: int = DEFAULT_MAX_LEN,
+        snapshot_path: Optional[str] = None
+    ):
         self.max_len = max_len
         self.snapshot_path = snapshot_path
 
-        # per-symbol deque of 5m bars
-        # {"time","open","high","low","close","volume"}
+        # per-instrument deque of 5m bars
+        # bar = {time, open, high, low, close, volume}
         self._bars: Dict[str, deque] = {}
         self._locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._global_lock = threading.Lock()
@@ -44,7 +48,7 @@ class MarketScanner:
         self._dedupe_map: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._paused_until: Dict[str, float] = {}
 
-        # callbacks on 5m bar close
+        # callbacks when 5m bar closes
         self._on_bar_close_callbacks: List[Callable[[str, dict], None]] = []
 
         # metrics
@@ -54,9 +58,10 @@ class MarketScanner:
         if self.snapshot_path:
             os.makedirs(os.path.dirname(self.snapshot_path), exist_ok=True)
 
-    # ---------------------
-    # Internal
-    # ---------------------
+    # ==========================================================
+    # INTERNAL
+    # ==========================================================
+
     def _ensure_inst(self, inst: str):
         with self._global_lock:
             if inst not in self._bars:
@@ -65,9 +70,10 @@ class MarketScanner:
     def _lock_for(self, inst: str):
         return self._locks[inst]
 
-    # ---------------------
-    # Ingestion (5m bars)
-    # ---------------------
+    # ==========================================================
+    # INGESTION (5m CLOSED BAR)
+    # ==========================================================
+
     def append_ohlc_bar(
         self,
         inst: str,
@@ -77,26 +83,27 @@ class MarketScanner:
         low_p: float,
         close_p: float,
         volume: float
-    ):
+    ) -> dict:
         """
         Ingest a completed 5-minute bar.
-        Safe to call from websocket thread.
+        Safe from websocket thread.
         """
         self._ensure_inst(inst)
 
+        bar = {
+            "time": time_iso,
+            "open": open_p,
+            "high": high_p,
+            "low": low_p,
+            "close": close_p,
+            "volume": volume
+        }
+
         with self._lock_for(inst):
-            bar = {
-                "time": time_iso,
-                "open": open_p,
-                "high": high_p,
-                "low": low_p,
-                "close": close_p,
-                "volume": volume
-            }
             self._bars[inst].append(bar)
             self.bars_closed += 1
 
-        # callbacks outside lock
+        # trigger callbacks outside lock
         for cb in list(self._on_bar_close_callbacks):
             try:
                 cb(inst, bar)
@@ -117,11 +124,20 @@ class MarketScanner:
         time_iso: Optional[str] = None
     ):
         if time_iso:
-            self.append_ohlc_bar(instrument, time_iso, price, high, low, close, volume)
+            self.append_ohlc_bar(
+                instrument,
+                time_iso,
+                price,
+                high,
+                low,
+                close,
+                volume
+            )
 
-    # ---------------------
-    # Accessors
-    # ---------------------
+    # ==========================================================
+    # ACCESSORS
+    # ==========================================================
+
     def get_last_n_bars(self, inst: str, n: int) -> List[dict]:
         if inst not in self._bars:
             return []
@@ -155,9 +171,10 @@ class MarketScanner:
     def active_instruments(self) -> List[str]:
         return list(self._bars.keys())
 
-    # ---------------------
-    # Callbacks
-    # ---------------------
+    # ==========================================================
+    # CALLBACKS
+    # ==========================================================
+
     def register_on_bar_close(self, cb: Callable[[str, dict], None]):
         if cb not in self._on_bar_close_callbacks:
             self._on_bar_close_callbacks.append(cb)
@@ -166,13 +183,14 @@ class MarketScanner:
         if cb in self._on_bar_close_callbacks:
             self._on_bar_close_callbacks.remove(cb)
 
-    # ---------------------
-    # Alert throttling
-    # ---------------------
+    # ==========================================================
+    # ALERT THROTTLING
+    # ==========================================================
+
     def can_emit_alert(self, inst: str, cooldown_seconds: int = 900) -> bool:
         now_ts = time.time()
-        paused_until = self._paused_until.get(inst)
 
+        paused_until = self._paused_until.get(inst)
         if paused_until and now_ts < paused_until:
             return False
 
@@ -185,11 +203,16 @@ class MarketScanner:
     def mark_alert_emitted(self, inst: str):
         self.last_alert_time[inst] = time.time()
 
-    def dedupe_alert(self, inst: str, direction: str, window_seconds: int = 900) -> bool:
+    def dedupe_alert(
+        self,
+        inst: str,
+        direction: str,
+        window_seconds: int = 900
+    ) -> bool:
         now_ts = time.time()
-        last_for_dir = self._dedupe_map[inst].get(direction)
+        last = self._dedupe_map[inst].get(direction)
 
-        if last_for_dir and (now_ts - last_for_dir) < window_seconds:
+        if last and (now_ts - last) < window_seconds:
             return True
 
         self._dedupe_map[inst][direction] = now_ts
@@ -198,9 +221,10 @@ class MarketScanner:
     def mark_instrument_paused(self, inst: str, until_ts: float):
         self._paused_until[inst] = until_ts
 
-    # ---------------------
-    # Snapshot
-    # ---------------------
+    # ==========================================================
+    # SNAPSHOT
+    # ==========================================================
+
     def save_snapshot(self, path: Optional[str] = None):
         path = path or self.snapshot_path
         if not path:
@@ -221,9 +245,10 @@ class MarketScanner:
         tmp = f"{path}.tmp"
         with open(tmp, "w") as f:
             json.dump(data, f)
+
         os.replace(tmp, path)
 
-    def load_snapshot(self, path: Optional[str] = None):
+    def load_snapshot(self, path: Optional[str] = None) -> bool:
         path = path or self.snapshot_path
         if not path or not os.path.exists(path):
             return False
@@ -241,10 +266,16 @@ class MarketScanner:
 
         return True
 
-    # ---------------------
-    # Replay
-    # ---------------------
-    def replay_bars(self, inst: str, bars: List[dict], call_callbacks: bool = False):
+    # ==========================================================
+    # REPLAY (BACKTEST / SIM)
+    # ==========================================================
+
+    def replay_bars(
+        self,
+        inst: str,
+        bars: List[dict],
+        call_callbacks: bool = False
+    ):
         self.replay_mode = True
         self._ensure_inst(inst)
 
@@ -252,6 +283,7 @@ class MarketScanner:
             for bar in bars:
                 if not all(k in bar for k in ("time", "open", "high", "low", "close", "volume")):
                     continue
+
                 self._bars[inst].append(bar)
                 self.bars_closed += 1
 
