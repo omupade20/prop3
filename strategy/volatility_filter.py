@@ -1,21 +1,9 @@
-# strategy/volatility_context.py
-"""
-Volatility context (STRICT, continuation-focused).
-
-Purpose:
-- CONFIRM real expansion
-- PENALIZE noisy spikes
-- FILTER choppy conditions
-
-Score range: -1.5 .. +1.5 (conservative)
-"""
-
 from dataclasses import dataclass
 from typing import List, Optional
 
 
 # =========================
-# Core ATR Calculations
+# ATR
 # =========================
 
 def compute_true_range(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
@@ -46,113 +34,66 @@ def compute_atr(
 
 
 # =========================
-# Volatility Context Output
+# Output
 # =========================
 
 @dataclass
 class VolatilityContext:
-    state: str          # CONTRACTING | BUILDING | EXPANDING | EXHAUSTION
-    score: float        # -1.5 .. +1.5
+    state: str      # LOW | NORMAL | HIGH
+    score: float    # -1 .. +1
     atr: float
-    move_pct_atr: float
+    vol_norm: float
     comment: str
 
 
 # =========================
-# Volatility Intelligence
+# 5m Volatility Analysis
 # =========================
 
 def analyze_volatility(
-    current_move: float,
-    atr_value: Optional[float],
-    atr_history: Optional[List[float]] = None
+    highs: List[float],
+    lows: List[float],
+    closes: List[float]
 ) -> VolatilityContext:
     """
-    Institutional volatility analysis.
+    5-minute volatility suitability.
 
-    Rules:
-    - <0.6 ATR = noise
-    - –1.1 ATR = building
-    - 1.1–1.6 ATR = healthy expansion
-    - >1.6 ATR = spike / exhaustion risk
+    LOW     → chop
+    NORMAL  → tradable
+    HIGH    → exhaustion risk
     """
 
-    if atr_value is None or atr_value <= 0:
-        return VolatilityContext(
-            "UNKNOWN", 0.0, 0.0, 0.0, "ATR unavailable"
-        )
+    atr = compute_atr(highs, lows, closes)
 
-    move_pct_atr = abs(current_move) / atr_value
+    if atr is None or len(closes) < 10:
+        return VolatilityContext("LOW", -0.5, 0.0, 0.0, "insufficient data")
 
-    # ----------------------
-    # 1️⃣ Contracting / Noise
-    # ----------------------
-    if move_pct_atr < 0.8:
+    avg_price = sum(closes[-10:]) / 10
+    vol_norm = atr / avg_price if avg_price > 0 else 0.0
+
+    # thresholds tuned for 5m equities
+    if vol_norm < 0.002:
         return VolatilityContext(
-            state="CONTRACTING",
+            state="LOW",
             score=-0.6,
-            atr=round(atr_value, 6),
-            move_pct_atr=round(move_pct_atr, 2),
-            comment="volatility_too_low"
+            atr=round(atr, 6),
+            vol_norm=round(vol_norm, 4),
+            comment="low volatility"
         )
 
-    # ----------------------
-    # 2️⃣ Building Phase
-    # ----------------------
-    if move_pct_atr < 1.1:
+    if vol_norm < 0.006:
         return VolatilityContext(
-            state="BUILDING",
-            score=0.2,
-            atr=round(atr_value, 6),
-            move_pct_atr=round(move_pct_atr, 2),
-            comment="volatility_building"
+            state="NORMAL",
+            score=0.8,
+            atr=round(atr, 6),
+            vol_norm=round(vol_norm, 4),
+            comment="tradable volatility"
         )
 
-    # ----------------------
-    # 3️⃣ Healthy Expansion
-    # ----------------------
-    if move_pct_atr < 1.5:
-        score = 1.1
-        comment = "healthy_expansion"
-
-        # ATR rising confirmation (optional)
-        if atr_history and len(atr_history) >= 5:
-            if atr_history[-1] > atr_history[-3]:
-                score += 0.2
-                comment += "_atr_rising"
-
-        return VolatilityContext(
-            state="EXPANDING",
-            score=min(score, 1.5),
-            atr=round(atr_value, 6),
-            move_pct_atr=round(move_pct_atr, 2),
-            comment=comment
-        )
-
-    # ----------------------
-    # 4️⃣ Spike / Exhaustion
-    # ----------------------
     return VolatilityContext(
-        state="EXHAUSTION",
-        score=-1.0,
-        atr=round(atr_value, 6),
-        move_pct_atr=round(move_pct_atr, 2),
-        comment="volatility_spike_risk"
+        state="HIGH",
+        score=-0.4,
+        atr=round(atr, 6),
+        vol_norm=round(vol_norm, 4),
+        comment="high volatility"
     )
-
-
-# =========================
-# Backward Compatibility
-# =========================
-
-def volatility_breakout_confirmed(
-    current_move: float,
-    atr_value: Optional[float],
-    atr_multiplier: float = 1.1
-) -> bool:
-    """
-    STRICT legacy confirmation.
-    """
-    if atr_value is None:
-        return False
-    return abs(current_move) >= atr_value * atr_multiplier
