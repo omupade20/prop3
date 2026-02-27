@@ -1,28 +1,42 @@
 """
-Support & Resistance utilities — 5-MINUTE STRUCTURE VERSION
+Support & Resistance utilities (5-minute structural version).
 
-Key Upgrade:
-- Designed for 5-minute highs/lows instead of 1-minute
-- Produces stronger intraday structure levels
-- Fewer but higher-impact SR zones
-- Optimized for continuation pullback strategy
-
-Usage:
-Pass 5-minute highs/lows (NOT 1-minute).
+Designed for:
+- 5-minute candles
+- multi-session structural SR
+- clean institutional zones
 """
 
 from typing import List, Dict, Optional, Tuple
 from statistics import mean
 
 
-# =========================================================
-# Local extrema detection (5m structure)
-# =========================================================
-
-def _find_local_extrema(values: List[float], window: int = 5) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+# =========================
+# Fallback SR
+# =========================
+def compute_simple_sr(highs: List[float], lows: List[float], lookback: int = 225) -> Dict[str, float]:
     """
-    Detect swing highs/lows in 5m structure.
-    Smaller window because 5m already smooth.
+    Fallback SR over ~3 trading days (5m).
+    """
+    highs = highs[-lookback:] if highs else []
+    lows = lows[-lookback:] if lows else []
+
+    if not highs or not lows:
+        return {"support": None, "resistance": None}
+
+    return {
+        "support": min(lows),
+        "resistance": max(highs)
+    }
+
+
+# =========================
+# Local extrema detection
+# =========================
+def _find_local_extrema(values: List[float], window: int = 9) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+    """
+    Find local highs/lows on 5m structure.
+    Larger window reduces noise.
     """
     n = len(values)
     maxima, minima = [], []
@@ -37,23 +51,23 @@ def _find_local_extrema(values: List[float], window: int = 5) -> Tuple[List[Tupl
         left = values[i - half:i]
         right = values[i + 1:i + 1 + half]
 
-        if all(center > x for x in left + right):
+        if all(center >= x for x in left + right):
             maxima.append((i, center))
 
-        if all(center < x for x in left + right):
+        if all(center <= x for x in left + right):
             minima.append((i, center))
 
     return maxima, minima
 
 
-# =========================================================
-# Clustering (5m tolerance slightly wider)
-# =========================================================
-
+# =========================
+# Cluster SR zones
+# =========================
 def _cluster_levels(peaks: List[float], tol_pct: float = 0.0045) -> List[Dict]:
     """
-    Cluster 5m peaks into SR zones.
-    Slightly wider tolerance because 5m swings bigger.
+    Cluster peaks into 5m SR zones.
+
+    Wider tolerance than 1m (≈0.45%).
     """
     if not peaks:
         return []
@@ -80,29 +94,31 @@ def _cluster_levels(peaks: List[float], tol_pct: float = 0.0045) -> List[Dict]:
         out.append({
             "level": round(lvl, 6),
             "count": len(c),
-            "strength": min(len(c), 5)  # 5m allows slightly stronger zones
+            "strength": min(len(c), 5)
         })
 
     return out
 
 
-# =========================================================
-# MAIN 5m SR COMPUTATION
-# =========================================================
-
+# =========================
+# Main SR computation
+# =========================
 def compute_sr_levels(
     highs: List[float],
     lows: List[float],
-    lookback: int = 60,
-    extrema_window: int = 5,
+    lookback: int = 225,
+    extrema_window: int = 9,
     cluster_tol_pct: float = 0.0045,
     max_levels: int = 3
 ) -> Dict[str, List[Dict]]:
     """
-    Compute SR from 5-minute highs/lows.
+    Structural SR for 5m trading.
 
-    lookback=60 → ~5 hours of 5m data
-    Produces macro intraday structure.
+    Defaults:
+    - lookback: ~3 days
+    - extrema_window: 9 bars
+    - tolerance: 0.45%
+    - max_levels: 3
     """
 
     highs_s = highs[-lookback:] if highs else []
@@ -120,28 +136,28 @@ def compute_sr_levels(
     resist_clusters = _cluster_levels(resistances, tol_pct=cluster_tol_pct)
     supp_clusters = _cluster_levels(supports, tol_pct=cluster_tol_pct)
 
-    supp_clusters_sorted = sorted(supp_clusters, key=lambda x: x["level"])[:max_levels]
-    res_clusters_sorted = sorted(resist_clusters, key=lambda x: x["level"], reverse=True)[:max_levels]
+    supp_sorted = sorted(supp_clusters, key=lambda x: x["level"])[:max_levels]
+    res_sorted = sorted(resist_clusters, key=lambda x: x["level"], reverse=True)[:max_levels]
 
     return {
-        "supports": supp_clusters_sorted,
-        "resistances": res_clusters_sorted
+        "supports": supp_sorted,
+        "resistances": res_sorted
     }
 
 
-# =========================================================
-# Nearest SR (unchanged)
-# =========================================================
-
+# =========================
+# Nearest SR
+# =========================
 def get_nearest_sr(
     price: float,
     sr_levels: Dict[str, List[Dict]],
-    max_search_pct: float = 0.03
+    max_search_pct: float = 0.035
 ) -> Optional[Dict]:
     """
-    Nearest SR within 3% (5m levels wider).
-    """
+    Find nearest SR within ~3.5% on 5m.
 
+    Wider than 1m due to structural zones.
+    """
     if not sr_levels:
         return None
 
@@ -183,10 +199,9 @@ def get_nearest_sr(
     return None
 
 
-# =========================================================
-# SR Location Score (slightly tuned for 5m)
-# =========================================================
-
+# =========================
+# SR Location Score
+# =========================
 def sr_location_score(
     price: float,
     nearest_sr: Optional[Dict],
@@ -194,21 +209,21 @@ def sr_location_score(
     proximity_threshold: float = 0.025
 ) -> float:
     """
-    5m SR proximity scoring.
-    Wider threshold because macro levels.
-    """
+    5m structural SR location score.
 
+    Only meaningful within ~2.5%.
+    """
     if nearest_sr is None:
         return 0.0
 
-    dist = nearest_sr.get("dist_pct", None)
+    dist = nearest_sr.get("dist_pct")
     if dist is None or dist > proximity_threshold:
         return 0.0
 
-    closeness = max(0.0, (proximity_threshold - dist) / (proximity_threshold + 1e-9))
+    closeness = (proximity_threshold - dist) / proximity_threshold
 
     strength = float(nearest_sr.get("strength", 1))
-    strength_factor = min(1.6, 0.7 + 0.2 * strength)
+    strength_factor = min(1.6, 0.7 + 0.18 * strength)
 
     sign = 0
     typ = nearest_sr.get("type")
@@ -218,6 +233,7 @@ def sr_location_score(
             sign = 1
         elif typ == "resistance":
             sign = -1
+
     elif direction == "SHORT":
         if typ == "resistance":
             sign = 1
