@@ -51,10 +51,10 @@ def _find_local_extrema(values: List[float], window: int = 9) -> Tuple[List[Tupl
         left = values[i - half:i]
         right = values[i + 1:i + 1 + half]
 
-        if all(center >= x for x in left + right):
+        if all(center > x for x in left + right):
             maxima.append((i, center))
 
-        if all(center <= x for x in left + right):
+        if all(center < x for x in left + right):
             minima.append((i, center))
 
     return maxima, minima
