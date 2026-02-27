@@ -1,157 +1,153 @@
 from typing import Optional, Dict, List
 from strategy.sr_levels import compute_sr_levels, get_nearest_sr
-from strategy.volume_filter import analyze_volume
-from strategy.volatility_filter import compute_atr, analyze_volatility
+from strategy.volume_context import analyze_volume
+from strategy.volatility_context import compute_atr, analyze_volatility
 from strategy.price_action import rejection_info
 
 
 def detect_pullback_signal(
-    prices_1m: List[float],
-    highs_1m: List[float],
-    lows_1m: List[float],
-    closes_1m: List[float],
-    volumes_1m: List[float],
-    highs_5m: List[float],
-    lows_5m: List[float],
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    volumes: List[float],
     htf_direction: str,
-    max_proximity: float = 0.025,
-    min_bars: int = 40
+    max_proximity: float = 0.02,
+    min_bars: int = 30
 ) -> Optional[Dict]:
     """
-    CONTINUATION PULLBACK DETECTOR (5m structure + 1m entry)
+    5-MINUTE SR PULLBACK DETECTOR (CORE ENGINE)
 
-    Structure:
-        - 5m SR defines macro level
-        - 1m defines timing
-        - Requires shallow pullback + resume
+    LONG  -> price near SUPPORT + bullish rejection
+    SHORT -> price near RESISTANCE + bearish rejection
     """
 
-    if len(closes_1m) < min_bars or len(highs_5m) < 20:
+    if len(closes) < min_bars:
         return None
 
-    last_price = closes_1m[-1]
+    price = closes[-1]
 
     # ==================================================
-    # 1️⃣ 5m STRUCTURE LOCATION
+    # 1️⃣ SR LOCATION
     # ==================================================
 
-    sr_5m = compute_sr_levels(highs_5m, lows_5m)
-    nearest = get_nearest_sr(last_price, sr_5m, max_search_pct=max_proximity)
+    sr = compute_sr_levels(highs, lows, lookback=240)
+    nearest = get_nearest_sr(price, sr, max_search_pct=max_proximity)
 
     if not nearest:
         return None
 
-    trade_direction = None
-
+    # Direction from SR + HTF alignment
     if nearest["type"] == "support" and htf_direction == "BULLISH":
-        trade_direction = "LONG"
-
+        direction = "LONG"
     elif nearest["type"] == "resistance" and htf_direction == "BEARISH":
-        trade_direction = "SHORT"
-
+        direction = "SHORT"
     else:
         return None
 
     # ==================================================
-    # 2️⃣ SHALLOW PULLBACK REQUIREMENT (Continuation logic)
+    # 2️⃣ EXTENSION FILTER (5m SCALE)
     # ==================================================
 
-    recent_leg = abs(closes_1m[-1] - closes_1m[-8])
-    atr = compute_atr(highs_1m, lows_1m, closes_1m)
+    atr = compute_atr(highs, lows, closes)
 
-    if not atr or atr <= 0:
+    if atr:
+        recent_swing = abs(closes[-1] - closes[-4])  # ~20min move
+        if recent_swing > atr * 1.8:
+            return None
+
+    # ==================================================
+    # 3️⃣ VOLATILITY QUALITY
+    # ==================================================
+
+    volat_ctx = analyze_volatility(
+        current_move=closes[-1] - closes[-2],
+        atr_value=atr
+    )
+
+    if volat_ctx.state in ("CONTRACTING", "EXHAUSTION"):
         return None
 
-    # Must NOT be extended
-    if recent_leg > atr * 1.4:
-        return None
-
     # ==================================================
-    # 3️⃣ 1m PRICE REJECTION AT LEVEL
+    # 4️⃣ REJECTION CONFIRMATION (PRIMARY)
     # ==================================================
 
-    last_rej = rejection_info(
-        closes_1m[-2],
-        highs_1m[-1],
-        lows_1m[-1],
-        closes_1m[-1]
+    rej = rejection_info(
+        closes[-2],
+        highs[-1],
+        lows[-1],
+        closes[-1]
     )
 
     rejection_ok = False
 
-    if trade_direction == "LONG" and last_rej["rejection_type"] == "BULLISH":
+    if direction == "LONG" and rej["rejection_type"] == "BULLISH":
         rejection_ok = True
 
-    if trade_direction == "SHORT" and last_rej["rejection_type"] == "BEARISH":
+    if direction == "SHORT" and rej["rejection_type"] == "BEARISH":
         rejection_ok = True
 
-    # Require some directional resume
-    resume_ok = False
-    if trade_direction == "LONG" and closes_1m[-1] > closes_1m[-3]:
-        resume_ok = True
-    if trade_direction == "SHORT" and closes_1m[-1] < closes_1m[-3]:
-        resume_ok = True
-
-    if not (rejection_ok or resume_ok):
-        return None
-
     # ==================================================
-    # 4️⃣ VOLUME CONFIRMATION (Stricter)
+    # 5️⃣ VOLUME SUPPORT (SOFTER in 5m)
     # ==================================================
 
-    vol_ctx = analyze_volume(volumes_1m, close_prices=closes_1m)
-
-    if vol_ctx.score < 0.8:
-        return None
+    vol_ctx = analyze_volume(volumes, close_prices=closes)
+    volume_ok = vol_ctx.score >= 0.3
 
     # ==================================================
-    # 5️⃣ VOLATILITY PHASE FILTER
+    # 6️⃣ STRUCTURE REACTION (5m)
     # ==================================================
 
-    volat_ctx = analyze_volatility(
-        current_move=closes_1m[-1] - closes_1m[-2],
-        atr_value=atr
-    )
+    reaction_ok = False
 
-    if volat_ctx.state not in ["BUILDING", "EXPANDING"]:
-        return None
+    if direction == "LONG" and closes[-1] > closes[-2]:
+        reaction_ok = True
+
+    if direction == "SHORT" and closes[-1] < closes[-2]:
+        reaction_ok = True
 
     # ==================================================
-    # 6️⃣ CONFIDENCE SCORING (More Selective)
+    # 7️⃣ LOCATION SCORING
+    # ==================================================
+
+    proximity = nearest["dist_pct"]
+    location_score = max(0.0, (max_proximity - proximity) / max_proximity)
+    location_score *= 2.0
+
+    # ==================================================
+    # 8️⃣ FINAL COMPONENTS
     # ==================================================
 
     components = {
-        "location": 0.0,
-        "rejection": 0.0,
-        "volume": 0.0,
-        "volatility": 0.0
+        "location": round(location_score, 2),
+        "rejection": 1.8 if rejection_ok else 0.0,
+        "volume": 0.8 if volume_ok else 0.0,
+        "volatility": 1.0 if volat_ctx.state == "EXPANDING" else 0.4,
+        "reaction": 0.6 if reaction_ok else 0.0
     }
-
-    # Stronger proximity weighting
-    proximity_score = max(0, (max_proximity - nearest["dist_pct"]) * 80)
-    components["location"] = min(proximity_score, 3.0)
-
-    if rejection_ok:
-        components["rejection"] = 2.0
-
-    components["volume"] = min(vol_ctx.score, 2.0)
-    components["volatility"] = min(volat_ctx.score, 1.5)
 
     total_score = sum(components.values())
 
-    if total_score < 5.5:
+    # ==================================================
+    # 9️⃣ CLASSIFICATION
+    # ==================================================
+
+    if total_score >= 4.8:
+        signal = "CONFIRMED"
+    elif total_score >= 3.2:
+        signal = "POTENTIAL"
+    else:
         return None
 
     return {
-        "signal": "CONFIRMED",
-        "direction": trade_direction,
+        "signal": signal,
+        "direction": direction,
         "score": round(total_score, 2),
         "nearest_level": nearest,
         "components": components,
         "context": {
             "volatility": volat_ctx.state,
             "volume": vol_ctx.strength,
-            "rejection": last_rej["rejection_type"]
+            "rejection": rej["rejection_type"]
         },
-        "reason": f"CONTINUATION_PULLBACK_{trade_direction}"
+        "reason": f"{signal}_{direction}"
     }
