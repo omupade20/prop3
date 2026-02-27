@@ -1,154 +1,100 @@
-import json
-import datetime
-import upstox_client
-from config.settings import ACCESS_TOKEN
-
-from strategy.scanner import MarketScanner
+from strategy.market_regime import detect_market_regime
+from strategy.htf_bias import get_htf_bias
+from strategy.pullback_detector import detect_pullback_signal
+from strategy.decision_engine import final_trade_decision
 from strategy.vwap_filter import VWAPCalculator
-from strategy.strategy_engine import StrategyEngine
-
-from execution.execution_engine import ExecutionEngine
-from execution.order_executor import OrderExecutor
-from execution.trade_monitor import TradeMonitor
-from execution.risk_manager import RiskManager
-from execution.trade_logger import TradeLogger
 
 
-FEED_MODE = "full"
+class StrategyEngine:
+    """
+    PURE 5-MINUTE SR PULLBACK ENGINE
 
-# ================================
-# LOAD UNIVERSE
-# ================================
-with open("data/nifty500_keys.json", "r") as f:
-    INSTRUMENT_LIST = json.load(f)
+    Uses:
+    - scanner 5m bars
+    - SR pullback detection
+    - VWAP environment
+    - HTF bias
+    """
 
-# ================================
-# CORE OBJECTS
-# ================================
-scanner = MarketScanner(max_len=600)
-vwap_calculators = {inst: VWAPCalculator() for inst in INSTRUMENT_LIST}
+    def __init__(self, scanner, vwap_calculators):
+        self.scanner = scanner
+        self.vwap_calculators = vwap_calculators
 
-strategy_engine = StrategyEngine(
-    scanner,
-    vwap_calculators
-)
-
-order_executor = OrderExecutor()
-trade_monitor = TradeMonitor()
-risk_manager = RiskManager()
-trade_logger = TradeLogger()
-
-execution_engine = ExecutionEngine(
-    order_executor,
-    trade_monitor,
-    risk_manager,
-    trade_logger
-)
-
-signals_today = {}
-last_bar_time = {}
-ALLOW_NEW_TRADES = True
-
-
-# ======================================
-# MARKET STREAMER (MAIN ENTRY)
-# ======================================
-def start_market_streamer():
-    global ALLOW_NEW_TRADES
-
-    config = upstox_client.Configuration()
-    config.access_token = ACCESS_TOKEN
-    api_client = upstox_client.ApiClient(config)
-
-    streamer = upstox_client.MarketDataStreamerV3(
-        api_client,
-        INSTRUMENT_LIST,
-        FEED_MODE
-    )
-
-    def on_message(message):
-        global ALLOW_NEW_TRADES
-
-        feeds = message.get("feeds", {})
-        now = datetime.datetime.now()
-        today = now.date().isoformat()
-
-        if today not in signals_today:
-            signals_today[today] = set()
-
-        current_prices = {}
-
-        for inst_key, feed_info in feeds.items():
-            data = feed_info.get("fullFeed", {}).get("marketFF", {})
-
-            # -------- LTP --------
-            try:
-                ltp = float(data["ltpc"]["ltp"])
-            except Exception:
-                continue
-
-            current_prices[inst_key] = ltp
-
-            # -------- OHLC --------
-            ohlc = data.get("marketOHLC", {}).get("ohlc", [])
-            if not ohlc:
-                continue
-
-            bar = ohlc[-1]
-
-            try:
-                high = float(bar["high"])
-                low = float(bar["low"])
-                close = float(bar["close"])
-                volume = float(bar["vol"])
-                ts = bar["ts"]
-            except Exception:
-                continue
-
-            # only process closed minute
-            prev_ts = last_bar_time.get(inst_key)
-            if prev_ts == ts:
-                continue
-
-            last_bar_time[inst_key] = ts
-
-            dt = datetime.datetime.fromtimestamp(ts / 1000)
-            minute_iso = dt.replace(second=0, microsecond=0).isoformat()
-
-            # =========================
-            # APPEND 1m BAR
-            # =========================
-            scanner.append_ohlc_bar(
-                inst_key,
-                minute_iso,
-                close,
-                high,
-                low,
-                close,
-                volume
-            )
-
-            # =========================
-            # STRATEGY EVALUATION
-            # =========================
-            decision = strategy_engine.evaluate(inst_key, ltp)
-
-            if not decision:
-                continue
-
-            if decision.state.startswith("EXECUTE"):
-                if inst_key in signals_today[today]:
-                    continue
-
-                signals_today[today].add(inst_key)
-                execution_engine.handle_entry(inst_key, decision, ltp)
+    def evaluate(self, inst_key: str, ltp: float):
 
         # =========================
-        # EXIT MANAGEMENT
+        # 1️⃣ DATA
         # =========================
-        execution_engine.handle_exits(current_prices, now)
+        if not self.scanner.has_enough_data(inst_key, min_bars=50):
+            return None
 
-    streamer.on("message", on_message)
-    streamer.connect()
+        highs = self.scanner.get_highs(inst_key)
+        lows = self.scanner.get_lows(inst_key)
+        closes = self.scanner.get_closes(inst_key)
+        volumes = self.scanner.get_volumes(inst_key)
 
-    print("🚀 5-Min Pullback Trading System LIVE")
+        if not closes or len(closes) < 30:
+            return None
+
+        # =========================
+        # 2️⃣ MARKET REGIME (5m)
+        # =========================
+        regime = detect_market_regime(
+            highs=highs,
+            lows=lows,
+            closes=closes
+        )
+
+        if regime.state == "RANGE":
+            return None
+
+        # =========================
+        # 3️⃣ VWAP
+        # =========================
+        if inst_key not in self.vwap_calculators:
+            self.vwap_calculators[inst_key] = VWAPCalculator()
+
+        vwap_calc = self.vwap_calculators[inst_key]
+        vwap_calc.update(ltp, volumes[-1] if volumes else 0)
+        vwap_ctx = vwap_calc.get_context(ltp)
+
+        # =========================
+        # 4️⃣ HTF BIAS
+        # =========================
+        htf_bias = get_htf_bias(
+            prices=closes,
+            vwap_value=vwap_ctx.vwap
+        )
+
+        # =========================
+        # 5️⃣ PULLBACK
+        # =========================
+        pullback = detect_pullback_signal(
+            highs=highs,
+            lows=lows,
+            closes=closes,
+            volumes=volumes,
+            htf_direction=htf_bias.direction
+        )
+
+        if not pullback:
+            return None
+
+        # =========================
+        # 6️⃣ DECISION
+        # =========================
+        decision = final_trade_decision(
+            inst_key=inst_key,
+            closes=closes,
+            volumes=volumes,
+            market_regime=regime.state,
+            htf_bias_direction=htf_bias.direction,
+            vwap_ctx=vwap_ctx,
+            pullback_signal=pullback
+        )
+
+        # debug info
+        decision.components["regime"] = regime.state
+        decision.components["htf_bias"] = htf_bias.label
+
+        return decision
