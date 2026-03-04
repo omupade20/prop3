@@ -11,7 +11,7 @@ from strategy.vwap_filter import VWAPContext
 
 @dataclass
 class DecisionResult:
-    state: str                 # IGNORE | PREPARE_LONG | PREPARE_SHORT | EXECUTE_LONG | EXECUTE_SHORT
+    state: str
     score: float
     direction: Optional[str]
     components: Dict[str, float]
@@ -19,21 +19,21 @@ class DecisionResult:
 
 
 # =========================
-# FINAL 5-MINUTE DECISION ENGINE
+# FINAL DECISION ENGINE
 # =========================
 
 def final_trade_decision(
     inst_key: str,
     closes: list[float],
     volumes: list[float],
-    market_regime: str,            # RANGE | TREND | STRONG_TREND
-    htf_bias_direction: str,       # BULLISH | BEARISH
+    market_regime: str,
+    htf_bias_direction: str,
     vwap_ctx: VWAPContext,
     pullback_signal: Optional[Dict],
 ) -> DecisionResult:
 
     # ==================================================
-    # 1️⃣ STRUCTURE (CORE: SR PULLBACK)
+    # 1️⃣ CORE STRUCTURE
     # ==================================================
 
     if not pullback_signal:
@@ -42,8 +42,9 @@ def final_trade_decision(
     direction = pullback_signal["direction"]
     pb_score = pullback_signal["score"]
 
-    # POTENTIAL → PREPARE only
+    # POTENTIAL → PREPARE
     if pullback_signal["signal"] == "POTENTIAL":
+
         return DecisionResult(
             state=f"PREPARE_{direction}",
             score=pb_score,
@@ -52,9 +53,12 @@ def final_trade_decision(
             reason="potential pullback"
         )
 
-    # Normalize pullback influence
-    score = pb_score * 0.85
-    components = {"pullback": round(pb_score * 0.85, 2)}
+    # Base score
+    score = pb_score * 0.9
+
+    components = {
+        "pullback": round(pb_score * 0.9, 2)
+    }
 
     # ==================================================
     # 2️⃣ HTF ALIGNMENT
@@ -70,36 +74,34 @@ def final_trade_decision(
     components["htf"] = 1.0
 
     # ==================================================
-    # 3️⃣ MARKET REGIME (5m)
+    # 3️⃣ MARKET REGIME
     # ==================================================
 
     if market_regime == "RANGE":
         return DecisionResult("IGNORE", 0.0, None, {}, "range regime")
 
     if market_regime == "TREND":
+
         score += 0.6
         components["regime"] = 0.6
 
     elif market_regime == "STRONG_TREND":
+
         score += 1.0
         components["regime"] = 1.0
 
     # ==================================================
-    # 4️⃣ VWAP ENVIRONMENT
+    # 4️⃣ VWAP CONTEXT (soft filter)
     # ==================================================
 
-    if direction == "LONG" and vwap_ctx.acceptance == "BELOW":
-        return DecisionResult("IGNORE", 0.0, None, {}, "below vwap")
+    vwap_score = vwap_ctx.score * 0.4
 
-    if direction == "SHORT" and vwap_ctx.acceptance == "ABOVE":
-        return DecisionResult("IGNORE", 0.0, None, {}, "above vwap")
-
-    vwap_score = max(0.0, vwap_ctx.score * 0.5)
     score += vwap_score
+
     components["vwap"] = round(vwap_score, 2)
 
     # ==================================================
-    # 5️⃣ LIQUIDITY SAFETY
+    # 5️⃣ LIQUIDITY
     # ==================================================
 
     liq = analyze_liquidity(volumes)
@@ -108,7 +110,9 @@ def final_trade_decision(
         return DecisionResult("IGNORE", 0.0, None, {}, "illiquid")
 
     liq_score = min(1.0, liq.score * 0.4)
+
     score += liq_score
+
     components["liquidity"] = round(liq_score, 2)
 
     # ==================================================
@@ -117,15 +121,18 @@ def final_trade_decision(
 
     score = round(score, 2)
 
-    if score >= 6.2:
-        state = f"EXECUTE_{direction}"
-        reason = "confirmed 5m pullback"
+    if score >= 5.0:
 
-    elif score >= 4.6:
+        state = f"EXECUTE_{direction}"
+        reason = "confirmed pullback"
+
+    elif score >= 3.8:
+
         state = f"PREPARE_{direction}"
-        reason = "developing 5m pullback"
+        reason = "developing pullback"
 
     else:
+
         state = "IGNORE"
         reason = "weak setup"
 
