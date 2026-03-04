@@ -6,24 +6,25 @@ from strategy.vwap_filter import VWAPCalculator
 
 
 class StrategyEngine:
-    """
-    PURE 5-MINUTE SR PULLBACK ENGINE
 
-    Uses:
-    - 1m scanner data
-    - internally interprets structure as 5m pullback
+    """
+    5-MINUTE SR PULLBACK ENGINE
     """
 
     def __init__(self, scanner, vwap_calculators):
+
         self.scanner = scanner
         self.vwap_calculators = vwap_calculators
+
 
     def evaluate(self, inst_key: str, ltp: float):
 
         # ======================================
         # 1️⃣ DATA SUFFICIENCY
         # ======================================
-        if not self.scanner.has_enough_data(inst_key, min_bars=60):
+
+        # 30 bars = 150 minutes of 5m data
+        if not self.scanner.has_enough_data(inst_key, min_bars=30):
             return None
 
         highs = self.scanner.get_highs(inst_key)
@@ -34,39 +35,47 @@ class StrategyEngine:
         if not highs or not lows or not closes or not volumes:
             return None
 
+
         # ======================================
         # 2️⃣ MARKET REGIME
         # ======================================
+
         regime = detect_market_regime(
             highs=highs,
             lows=lows,
             closes=closes
         )
 
-        if regime.state == "RANGE":
-            return None
 
         # ======================================
         # 3️⃣ VWAP CONTEXT
         # ======================================
+
         if inst_key not in self.vwap_calculators:
             self.vwap_calculators[inst_key] = VWAPCalculator()
 
         vwap_calc = self.vwap_calculators[inst_key]
-        vwap_calc.update(ltp, volumes[-1])
-        vwap_ctx = vwap_calc.get_context(ltp)
+
+        # update using bar close
+        vwap_calc.update(closes[-1], volumes[-1])
+
+        vwap_ctx = vwap_calc.get_context(closes[-1])
+
 
         # ======================================
         # 4️⃣ HTF BIAS
         # ======================================
+
         htf_bias = get_htf_bias(
             prices=closes,
             vwap_value=vwap_ctx.vwap
         )
 
+
         # ======================================
         # 5️⃣ PULLBACK DETECTION
         # ======================================
+
         pullback = detect_pullback_signal(
             highs=highs,
             lows=lows,
@@ -78,9 +87,11 @@ class StrategyEngine:
         if not pullback:
             return None
 
+
         # ======================================
         # 6️⃣ FINAL DECISION
         # ======================================
+
         decision = final_trade_decision(
             inst_key=inst_key,
             closes=closes,
@@ -90,6 +101,11 @@ class StrategyEngine:
             vwap_ctx=vwap_ctx,
             pullback_signal=pullback
         )
+
+
+        # ======================================
+        # 7️⃣ ATTACH CONTEXT
+        # ======================================
 
         decision.components["regime"] = regime.state
         decision.components["htf_bias"] = htf_bias.label
