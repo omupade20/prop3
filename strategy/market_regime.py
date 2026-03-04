@@ -1,16 +1,22 @@
+# strategy/market_regime.py
+
 from typing import List, Optional
 from dataclasses import dataclass
 
 
 # =========================
-# Core Calculations
+# TRUE RANGE
 # =========================
 
 def compute_true_range(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
+
     if len(highs) < 2:
         return []
+
     tr = []
+
     for i in range(1, len(highs)):
+
         tr.append(
             max(
                 highs[i] - lows[i],
@@ -18,30 +24,56 @@ def compute_true_range(highs: List[float], lows: List[float], closes: List[float
                 abs(lows[i] - closes[i - 1])
             )
         )
+
     return tr
 
 
-def compute_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+# =========================
+# ATR
+# =========================
+
+def compute_atr(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    period: int = 14
+) -> Optional[float]:
+
     tr = compute_true_range(highs, lows, closes)
+
     if len(tr) < period:
         return None
+
     return sum(tr[-period:]) / period
 
 
-def compute_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
-    if len(highs) < period + 1:
+# =========================
+# ADX (simplified)
+# =========================
+
+def compute_adx(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    period: int = 14
+) -> Optional[float]:
+
+    if len(highs) < period + 2:
         return None
 
-    plus_dm, minus_dm = [], []
+    plus_dm = []
+    minus_dm = []
 
     for i in range(1, len(highs)):
-        up = highs[i] - highs[i - 1]
-        down = lows[i - 1] - lows[i]
 
-        plus_dm.append(up if up > down and up > 0 else 0)
-        minus_dm.append(down if down > up and down > 0 else 0)
+        up_move = highs[i] - highs[i - 1]
+        down_move = lows[i - 1] - lows[i]
+
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
 
     atr = compute_atr(highs, lows, closes, period)
+
     if atr is None or atr == 0:
         return None
 
@@ -52,24 +84,26 @@ def compute_adx(highs: List[float], lows: List[float], closes: List[float], peri
         return 0.0
 
     dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+
     return dx
 
 
 # =========================
-# Regime Output
+# REGIME OUTPUT
 # =========================
 
 @dataclass
 class MarketRegime:
-    state: str        # RANGE | TREND | STRONG_TREND
-    strength: float   # 0 – 10
+
+    state: str       # RANGE | TREND | STRONG_TREND
+    strength: float  # 0 – 10
     atr: float
     adx: float
     comment: str
 
 
 # =========================
-# 5m Regime Detection
+# MARKET REGIME DETECTOR
 # =========================
 
 def detect_market_regime(
@@ -78,34 +112,51 @@ def detect_market_regime(
     closes: List[float],
     min_bars: int = 25
 ) -> MarketRegime:
-    """
-    5-minute trend suitability detector.
 
-    Purpose:
-    - Decide if pullbacks are tradable
-    - Filter chop
+    """
+    5-minute regime suitability.
+
+    Goal:
+    - Detect trending market
+    - Avoid chop
     """
 
     if len(highs) < min_bars:
-        return MarketRegime("RANGE", 0.5, 0.0, 0.0, "insufficient data")
+
+        return MarketRegime(
+            state="RANGE",
+            strength=0.5,
+            atr=0.0,
+            adx=0.0,
+            comment="insufficient data"
+        )
 
     atr = compute_atr(highs, lows, closes)
     adx = compute_adx(highs, lows, closes)
 
     if atr is None or adx is None:
-        return MarketRegime("RANGE", 0.5, 0.0, 0.0, "indicators unavailable")
 
-    # normalized volatility
-    avg_price = sum(closes[-24:]) / min(24, len(closes))
+        return MarketRegime(
+            state="RANGE",
+            strength=0.5,
+            atr=0.0,
+            adx=0.0,
+            comment="indicators unavailable"
+        )
+
+    avg_price = sum(closes[-20:]) / 20
+
     vol_norm = atr / avg_price if avg_price > 0 else 0.0
 
-    # =====================
-    # REGIME RULES (5m)
-    # =====================
+    # ======================
+    # REGIME LOGIC
+    # ======================
 
-    # strong trend
-    if adx >= 28 and vol_norm > 0.004:
-        strength = min(10.0, 6 + (adx - 28) * 0.15)
+    # Strong trend
+    if adx >= 25 and vol_norm > 0.002:
+
+        strength = min(10.0, 6 + (adx - 25) * 0.2)
+
         return MarketRegime(
             state="STRONG_TREND",
             strength=round(strength, 2),
@@ -114,9 +165,11 @@ def detect_market_regime(
             comment="strong trend"
         )
 
-    # normal trend
-    if adx >= 20 and vol_norm > 0.0025:
-        strength = min(10.0, 4 + (adx - 20) * 0.2)
+    # Normal trend
+    if adx >= 16 and vol_norm > 0.0015:
+
+        strength = min(10.0, 4 + (adx - 16) * 0.25)
+
         return MarketRegime(
             state="TREND",
             strength=round(strength, 2),
@@ -125,8 +178,9 @@ def detect_market_regime(
             comment="tradable trend"
         )
 
-    # otherwise range
-    strength = max(0.5, adx * 0.08)
+    # Range market
+
+    strength = max(0.5, adx * 0.06)
 
     return MarketRegime(
         state="RANGE",
