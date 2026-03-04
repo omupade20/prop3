@@ -1,3 +1,5 @@
+# strategy/price_action.py
+
 from typing import List, Dict
 
 
@@ -12,19 +14,10 @@ def rejection_info(open_p: float, high: float, low: float, close: float) -> Dict
     Detects:
       - bullish rejection (long lower wick)
       - bearish rejection (long upper wick)
-
-    Returns:
-      {
-        rejection_type: BULLISH | BEARISH | None
-        rejection_score: 0..1
-        upper_wick: float
-        lower_wick: float
-        body: float
-        range: float
-      }
     """
 
     body = abs(close - open_p)
+
     total_range = max(high - low, 1e-9)
 
     upper_wick = max(0.0, high - max(close, open_p))
@@ -37,14 +30,25 @@ def rejection_info(open_p: float, high: float, low: float, close: float) -> Dict
     rejection_type = None
     rejection_score = 0.0
 
-    # tuned for 5m candles (stronger requirement)
-    if lower_rel > 0.35 and lower_rel > body_rel * 1.2:
-        rejection_type = "BULLISH"
-        rejection_score = min(1.0, (lower_rel - 0.35) / 0.5)
+    # =========================
+    # Bullish rejection
+    # =========================
 
-    elif upper_rel > 0.35 and upper_rel > body_rel * 1.2:
+    if lower_rel > 0.28 and lower_rel > body_rel * 1.05:
+
+        rejection_type = "BULLISH"
+
+        rejection_score = min(1.0, (lower_rel - 0.28) / 0.45)
+
+    # =========================
+    # Bearish rejection
+    # =========================
+
+    elif upper_rel > 0.28 and upper_rel > body_rel * 1.05:
+
         rejection_type = "BEARISH"
-        rejection_score = min(1.0, (upper_rel - 0.35) / 0.5)
+
+        rejection_score = min(1.0, (upper_rel - 0.28) / 0.45)
 
     return {
         "rejection_type": rejection_type,
@@ -66,24 +70,13 @@ def price_action_context(
     opens: List[float],
     closes: List[float],
 ) -> Dict:
+
     """
-    5-minute rejection confirmation.
-
-    Output:
-      {
-        rejection_type
-        rejection_score
-        score
-        comment
-      }
-
-    Score meaning:
-      +1 strong bullish rejection
-      -1 strong bearish rejection
-      0 none
+    Interpret rejection strength from last candle.
     """
 
     if not highs or not lows or not opens or not closes:
+
         return {
             "rejection_type": None,
             "rejection_score": 0.0,
@@ -99,14 +92,19 @@ def price_action_context(
     )
 
     score = 0.0
+
     comment = "no rejection"
 
     if rej["rejection_type"] == "BULLISH":
+
         score = rej["rejection_score"]
+
         comment = "bullish rejection"
 
     elif rej["rejection_type"] == "BEARISH":
+
         score = -rej["rejection_score"]
+
         comment = "bearish rejection"
 
     return {
