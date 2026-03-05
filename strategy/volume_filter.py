@@ -4,10 +4,6 @@ from dataclasses import dataclass
 from typing import List
 
 
-# =========================
-# OUTPUT
-# =========================
-
 @dataclass
 class VolumeContext:
 
@@ -17,10 +13,6 @@ class VolumeContext:
     avg_volume: float
     comment: str
 
-
-# =========================
-# VOLUME ANALYSIS
-# =========================
 
 def analyze_volume(
     volume_history: List[float],
@@ -57,7 +49,8 @@ def analyze_volume(
             comment="zero volume"
         )
 
-    rel = current / avg_vol
+    # relative volume
+    rel = min(current / avg_vol, 3.0)
 
     # ======================
     # PARTICIPATION RULES
@@ -69,7 +62,7 @@ def analyze_volume(
             state="LOW",
             score=-0.5,
             rel_volume=round(rel, 2),
-            avg_volume=round(avg_vol),
+            avg_volume=round(avg_vol, 2),
             comment="low participation"
         )
 
@@ -79,7 +72,7 @@ def analyze_volume(
             state="NORMAL",
             score=0.6,
             rel_volume=round(rel, 2),
-            avg_volume=round(avg_vol),
+            avg_volume=round(avg_vol, 2),
             comment="normal participation"
         )
 
@@ -87,6 +80,6 @@ def analyze_volume(
         state="HIGH",
         score=1.0,
         rel_volume=round(rel, 2),
-        avg_volume=round(avg_vol),
+        avg_volume=round(avg_vol, 2),
         comment="high participation"
     )
