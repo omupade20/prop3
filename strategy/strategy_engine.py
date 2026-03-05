@@ -23,7 +23,7 @@ class StrategyEngine:
         # 1️⃣ DATA SUFFICIENCY
         # ======================================
 
-        # 30 bars = 150 minutes of 5m data
+        # Need at least 30 bars of 5m data
         if not self.scanner.has_enough_data(inst_key, min_bars=30):
             return None
 
@@ -46,6 +46,10 @@ class StrategyEngine:
             closes=closes
         )
 
+        # Ignore chop markets early
+        if regime.state == "RANGE":
+            return None
+
 
         # ======================================
         # 3️⃣ VWAP CONTEXT
@@ -56,7 +60,7 @@ class StrategyEngine:
 
         vwap_calc = self.vwap_calculators[inst_key]
 
-        # update using bar close
+        # Update VWAP using last closed bar
         vwap_calc.update(closes[-1], volumes[-1])
 
         vwap_ctx = vwap_calc.get_context(closes[-1])
@@ -101,6 +105,9 @@ class StrategyEngine:
             vwap_ctx=vwap_ctx,
             pullback_signal=pullback
         )
+
+        if not decision:
+            return None
 
 
         # ======================================
