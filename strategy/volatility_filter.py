@@ -4,11 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 
-# =========================
-# TRUE RANGE
-# =========================
-
-def compute_true_range(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
+def compute_true_range(highs: List[float], lows: List[float], closes: List[float]):
 
     if len(highs) < 2:
         return []
@@ -28,16 +24,7 @@ def compute_true_range(highs: List[float], lows: List[float], closes: List[float
     return tr
 
 
-# =========================
-# ATR
-# =========================
-
-def compute_atr(
-    highs: List[float],
-    lows: List[float],
-    closes: List[float],
-    period: int = 14
-) -> Optional[float]:
+def compute_atr(highs, lows, closes, period=14):
 
     tr = compute_true_range(highs, lows, closes)
 
@@ -47,33 +34,17 @@ def compute_atr(
     return sum(tr[-period:]) / period
 
 
-# =========================
-# VOLATILITY OUTPUT
-# =========================
-
 @dataclass
 class VolatilityContext:
 
-    state: str      # LOW | NORMAL | HIGH
-    score: float    # -1 .. +1
+    state: str
+    score: float
     atr: float
     vol_norm: float
     comment: str
 
 
-# =========================
-# VOLATILITY ANALYSIS
-# =========================
-
-def analyze_volatility(
-    highs: List[float],
-    lows: List[float],
-    closes: List[float]
-) -> VolatilityContext:
-
-    """
-    Intraday volatility suitability.
-    """
+def analyze_volatility(highs, lows, closes):
 
     atr = compute_atr(highs, lows, closes)
 
@@ -81,7 +52,7 @@ def analyze_volatility(
 
         return VolatilityContext(
             state="LOW",
-            score=-0.5,
+            score=-0.3,
             atr=0.0,
             vol_norm=0.0,
             comment="insufficient data"
@@ -92,20 +63,20 @@ def analyze_volatility(
     vol_norm = atr / avg_price if avg_price > 0 else 0.0
 
     # ======================
-    # VOLATILITY RULES
+    # IMPROVED THRESHOLDS
     # ======================
 
-    if vol_norm < 0.0014:
+    if vol_norm < 0.001:
 
         return VolatilityContext(
             state="LOW",
-            score=-0.4,
+            score=-0.2,
             atr=round(atr, 6),
             vol_norm=round(vol_norm, 5),
             comment="low volatility"
         )
 
-    if vol_norm < 0.005:
+    if vol_norm < 0.006:
 
         return VolatilityContext(
             state="NORMAL",
@@ -117,7 +88,7 @@ def analyze_volatility(
 
     return VolatilityContext(
         state="HIGH",
-        score=-0.2,
+        score=-0.1,
         atr=round(atr, 6),
         vol_norm=round(vol_norm, 5),
         comment="high volatility"
