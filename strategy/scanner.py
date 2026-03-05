@@ -1,13 +1,4 @@
-"""
-MarketScanner (production-ready).
-
-Responsibilities:
-- Store rolling OHLCV bars per instrument
-- Provide fast OHLCV access for strategy
-- Thread-safe ingestion from websocket
-- Alert throttling / dedupe
-- Snapshot save/load
-"""
+# strategy/scanner.py
 
 import json
 import os
@@ -33,27 +24,24 @@ class MarketScanner:
         self.max_len = max_len
         self.snapshot_path = snapshot_path
 
-        # instrument -> deque of bars
         self._bars: Dict[str, deque] = {}
 
-        # locks
         self._locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._global_lock = threading.Lock()
 
-        # alert tracking
         self.last_alert_time: Dict[str, float] = {}
         self._dedupe_map: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._paused_until: Dict[str, float] = {}
 
-        # callbacks
         self._on_bar_close_callbacks: List[Callable[[str, dict], None]] = []
 
-        # metrics
         self.bars_closed = 0
         self.replay_mode = False
 
         if self.snapshot_path:
-            os.makedirs(os.path.dirname(self.snapshot_path), exist_ok=True)
+            directory = os.path.dirname(self.snapshot_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
 
     # ==========================================================
     # INTERNAL
@@ -98,7 +86,6 @@ class MarketScanner:
             self._bars[inst].append(bar)
             self.bars_closed += 1
 
-        # callbacks
         for cb in list(self._on_bar_close_callbacks):
             try:
                 cb(inst, bar)
@@ -106,28 +93,6 @@ class MarketScanner:
                 pass
 
         return bar
-
-    # compatibility wrapper
-    def update(
-        self,
-        instrument: str,
-        price: float,
-        high: float,
-        low: float,
-        close: float,
-        volume: float,
-        time_iso: Optional[str] = None
-    ):
-        if time_iso:
-            self.append_ohlc_bar(
-                instrument,
-                time_iso,
-                price,
-                high,
-                low,
-                close,
-                volume
-            )
 
     # ==========================================================
     # ACCESSORS
@@ -140,14 +105,6 @@ class MarketScanner:
 
         with self._lock_for(inst):
             return list(self._bars[inst])[-n:]
-
-    def get_last_bar(self, inst: str) -> Optional[dict]:
-
-        if inst not in self._bars or not self._bars[inst]:
-            return None
-
-        with self._lock_for(inst):
-            return dict(self._bars[inst][-1])
 
     def get_highs(self, inst: str) -> List[float]:
         return [b["high"] for b in self.get_last_n_bars(inst, self.max_len)]
@@ -162,24 +119,15 @@ class MarketScanner:
         return [b["volume"] for b in self.get_last_n_bars(inst, self.max_len)]
 
     def has_enough_data(self, inst: str, min_bars: int = 30) -> bool:
-        return inst in self._bars and len(self._bars[inst]) >= min_bars
+
+        if inst not in self._bars:
+            return False
+
+        with self._lock_for(inst):
+            return len(self._bars[inst]) >= min_bars
 
     def active_instruments(self) -> List[str]:
         return list(self._bars.keys())
-
-    # ==========================================================
-    # CALLBACKS
-    # ==========================================================
-
-    def register_on_bar_close(self, cb: Callable[[str, dict], None]):
-
-        if cb not in self._on_bar_close_callbacks:
-            self._on_bar_close_callbacks.append(cb)
-
-    def unregister_on_bar_close(self, cb: Callable[[str, dict], None]):
-
-        if cb in self._on_bar_close_callbacks:
-            self._on_bar_close_callbacks.remove(cb)
 
     # ==========================================================
     # ALERT CONTROL
@@ -202,13 +150,11 @@ class MarketScanner:
         return (now_ts - last) >= cooldown_seconds
 
     def mark_alert_emitted(self, inst: str):
-
         self.last_alert_time[inst] = time.time()
 
     def dedupe_alert(self, inst: str, direction: str, window_seconds: int = 900) -> bool:
 
         now_ts = time.time()
-
         last = self._dedupe_map[inst].get(direction)
 
         if last and (now_ts - last) < window_seconds:
@@ -216,10 +162,6 @@ class MarketScanner:
 
         self._dedupe_map[inst][direction] = now_ts
         return False
-
-    def mark_instrument_paused(self, inst: str, until_ts: float):
-
-        self._paused_until[inst] = until_ts
 
     # ==========================================================
     # SNAPSHOT
@@ -250,54 +192,3 @@ class MarketScanner:
             json.dump(data, f)
 
         os.replace(tmp, path)
-
-    def load_snapshot(self, path: Optional[str] = None) -> bool:
-
-        path = path or self.snapshot_path
-
-        if not path or not os.path.exists(path):
-            return False
-
-        with open(path, "r") as f:
-            data = json.load(f)
-
-        with self._global_lock:
-
-            for inst, bars in data.get("bars", {}).items():
-                self._bars[inst] = deque(bars, maxlen=self.max_len)
-
-            self.last_alert_time = data.get("last_alert_time", {})
-            self._dedupe_map = defaultdict(dict, data.get("dedupe_map", {}))
-            self._paused_until = data.get("paused_until", {})
-
-        return True
-
-    # ==========================================================
-    # REPLAY (BACKTEST)
-    # ==========================================================
-
-    def replay_bars(self, inst: str, bars: List[dict], call_callbacks: bool = False):
-
-        self.replay_mode = True
-        self._ensure_inst(inst)
-
-        with self._lock_for(inst):
-
-            for bar in bars:
-
-                if not all(k in bar for k in ("time", "open", "high", "low", "close", "volume")):
-                    continue
-
-                self._bars[inst].append(bar)
-                self.bars_closed += 1
-
-                if call_callbacks:
-
-                    for cb in list(self._on_bar_close_callbacks):
-
-                        try:
-                            cb(inst, bar)
-                        except Exception:
-                            pass
-
-        self.replay_mode = False
