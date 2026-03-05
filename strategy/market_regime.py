@@ -4,11 +4,7 @@ from typing import List, Optional
 from dataclasses import dataclass
 
 
-# =========================
-# TRUE RANGE
-# =========================
-
-def compute_true_range(highs: List[float], lows: List[float], closes: List[float]) -> List[float]:
+def compute_true_range(highs: List[float], lows: List[float], closes: List[float]):
 
     if len(highs) < 2:
         return []
@@ -28,10 +24,6 @@ def compute_true_range(highs: List[float], lows: List[float], closes: List[float
     return tr
 
 
-# =========================
-# ATR
-# =========================
-
 def compute_atr(
     highs: List[float],
     lows: List[float],
@@ -46,10 +38,6 @@ def compute_atr(
 
     return sum(tr[-period:]) / period
 
-
-# =========================
-# ADX (simplified)
-# =========================
 
 def compute_adx(
     highs: List[float],
@@ -88,23 +76,15 @@ def compute_adx(
     return dx
 
 
-# =========================
-# REGIME OUTPUT
-# =========================
-
 @dataclass
 class MarketRegime:
 
-    state: str       # RANGE | TREND | STRONG_TREND
-    strength: float  # 0 – 10
+    state: str
+    strength: float
     atr: float
     adx: float
     comment: str
 
-
-# =========================
-# MARKET REGIME DETECTOR
-# =========================
 
 def detect_market_regime(
     highs: List[float],
@@ -112,14 +92,6 @@ def detect_market_regime(
     closes: List[float],
     min_bars: int = 25
 ) -> MarketRegime:
-
-    """
-    5-minute regime suitability.
-
-    Goal:
-    - Detect trending market
-    - Avoid chop
-    """
 
     if len(highs) < min_bars:
 
@@ -144,7 +116,9 @@ def detect_market_regime(
             comment="indicators unavailable"
         )
 
-    avg_price = sum(closes[-20:]) / 20
+    window = min(20, len(closes))
+
+    avg_price = sum(closes[-window:]) / window
 
     vol_norm = atr / avg_price if avg_price > 0 else 0.0
 
@@ -152,10 +126,9 @@ def detect_market_regime(
     # REGIME LOGIC
     # ======================
 
-    # Strong trend
-    if adx >= 25 and vol_norm > 0.002:
+    if adx >= 22 and vol_norm > 0.002:
 
-        strength = min(10.0, 6 + (adx - 25) * 0.2)
+        strength = min(10.0, 6 + (adx - 22) * 0.25)
 
         return MarketRegime(
             state="STRONG_TREND",
@@ -165,10 +138,9 @@ def detect_market_regime(
             comment="strong trend"
         )
 
-    # Normal trend
-    if adx >= 16 and vol_norm > 0.0015:
+    if adx >= 14 and vol_norm > 0.0013:
 
-        strength = min(10.0, 4 + (adx - 16) * 0.25)
+        strength = min(10.0, 4 + (adx - 14) * 0.3)
 
         return MarketRegime(
             state="TREND",
@@ -177,8 +149,6 @@ def detect_market_regime(
             adx=round(adx, 2),
             comment="tradable trend"
         )
-
-    # Range market
 
     strength = max(0.5, adx * 0.06)
 
