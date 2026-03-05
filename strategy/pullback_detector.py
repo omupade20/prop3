@@ -14,13 +14,9 @@ def detect_pullback_signal(
     closes: List[float],
     volumes: List[float],
     htf_direction: str,
-    max_proximity: float = 0.035,
+    max_proximity: float = 0.04,
     min_bars: int = 30
 ) -> Optional[Dict]:
-
-    """
-    5m SR pullback detector.
-    """
 
     if len(closes) < min_bars:
         return None
@@ -46,14 +42,28 @@ def detect_pullback_signal(
     # DIRECTION
     # ===============================
 
-    if nearest["type"] == "support" and htf_direction == "BULLISH":
+    direction = None
+
+    if nearest["type"] == "support":
         direction = "LONG"
 
-    elif nearest["type"] == "resistance" and htf_direction == "BEARISH":
+    elif nearest["type"] == "resistance":
         direction = "SHORT"
 
-    else:
+    if direction is None:
         return None
+
+    # ===============================
+    # HTF ALIGNMENT (soft)
+    # ===============================
+
+    htf_score = 0
+
+    if direction == "LONG" and htf_direction == "BULLISH":
+        htf_score = 1.0
+
+    elif direction == "SHORT" and htf_direction == "BEARISH":
+        htf_score = 1.0
 
     # ===============================
     # EXTENSION FILTER
@@ -62,21 +72,16 @@ def detect_pullback_signal(
     atr = compute_atr(highs, lows, closes)
 
     if atr:
-
         recent_swing = abs(closes[-1] - closes[-6])
 
-        if recent_swing > atr * 2.5:
+        if recent_swing > atr * 3:
             return None
 
     # ===============================
     # VOLATILITY
     # ===============================
 
-    volat_ctx = analyze_volatility(
-        highs,
-        lows,
-        closes
-    )
+    volat_ctx = analyze_volatility(highs, lows, closes)
 
     if volat_ctx.state == "LOW":
         return None
@@ -92,13 +97,13 @@ def detect_pullback_signal(
         closes[-1]
     )
 
-    rejection_ok = False
+    rejection_score = 0
 
     if direction == "LONG" and rej["rejection_type"] == "BULLISH":
-        rejection_ok = True
+        rejection_score = 1.2
 
     if direction == "SHORT" and rej["rejection_type"] == "BEARISH":
-        rejection_ok = True
+        rejection_score = 1.2
 
     # ===============================
     # VOLUME
@@ -106,19 +111,19 @@ def detect_pullback_signal(
 
     vol_ctx = analyze_volume(volumes)
 
-    volume_ok = vol_ctx.score >= 0.3
+    volume_score = 0.6 if vol_ctx.score >= 0.3 else 0.2
 
     # ===============================
     # STRUCTURE REACTION
     # ===============================
 
-    reaction_ok = False
+    reaction_score = 0
 
     if direction == "LONG" and closes[-1] > closes[-3]:
-        reaction_ok = True
+        reaction_score = 0.6
 
     if direction == "SHORT" and closes[-1] < closes[-3]:
-        reaction_ok = True
+        reaction_score = 0.6
 
     # ===============================
     # LOCATION SCORE
@@ -131,7 +136,7 @@ def detect_pullback_signal(
         (max_proximity - proximity) / max_proximity
     )
 
-    location_score *= 2.0
+    location_score *= 2.2
 
     # ===============================
     # COMPONENTS
@@ -141,13 +146,15 @@ def detect_pullback_signal(
 
         "location": round(location_score, 2),
 
-        "rejection": 1.2 if rejection_ok else 0.0,
+        "htf": htf_score,
 
-        "volume": 0.8 if volume_ok else 0.0,
+        "rejection": rejection_score,
 
-        "volatility": 1.0 if volat_ctx.state == "NORMAL" else 0.5,
+        "volume": volume_score,
 
-        "reaction": 0.6 if reaction_ok else 0.0
+        "volatility": 1.0 if volat_ctx.state == "NORMAL" else 0.6,
+
+        "reaction": reaction_score
     }
 
     total_score = sum(components.values())
@@ -156,10 +163,10 @@ def detect_pullback_signal(
     # CLASSIFICATION
     # ===============================
 
-    if total_score >= 4.5:
+    if total_score >= 4.8:
         signal = "CONFIRMED"
 
-    elif total_score >= 3.0:
+    elif total_score >= 3.2:
         signal = "POTENTIAL"
 
     else:
