@@ -141,4 +141,4 @@ def get_htf_bias(
         strength=strength,
         label=label,
         comment=" | ".join(comment_parts)
-    )s
+    )
