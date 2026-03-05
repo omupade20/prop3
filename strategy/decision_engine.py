@@ -5,10 +5,6 @@ from strategy.liquidity_filter import analyze_liquidity
 from strategy.vwap_filter import VWAPContext
 
 
-# =========================
-# Output Structure
-# =========================
-
 @dataclass
 class DecisionResult:
     state: str
@@ -17,10 +13,6 @@ class DecisionResult:
     components: Dict[str, float]
     reason: str
 
-
-# =========================
-# FINAL DECISION ENGINE
-# =========================
 
 def final_trade_decision(
     inst_key: str,
@@ -42,18 +34,6 @@ def final_trade_decision(
     direction = pullback_signal["direction"]
     pb_score = pullback_signal["score"]
 
-    # POTENTIAL → PREPARE
-    if pullback_signal["signal"] == "POTENTIAL":
-
-        return DecisionResult(
-            state=f"PREPARE_{direction}",
-            score=pb_score,
-            direction=direction,
-            components={"pullback": pb_score},
-            reason="potential pullback"
-        )
-
-    # Base score
     score = pb_score * 0.9
 
     components = {
@@ -81,23 +61,20 @@ def final_trade_decision(
         return DecisionResult("IGNORE", 0.0, None, {}, "range regime")
 
     if market_regime == "TREND":
-
         score += 0.6
         components["regime"] = 0.6
 
     elif market_regime == "STRONG_TREND":
-
         score += 1.0
         components["regime"] = 1.0
 
     # ==================================================
-    # 4️⃣ VWAP CONTEXT (soft filter)
+    # 4️⃣ VWAP CONTEXT (soft)
     # ==================================================
 
-    vwap_score = vwap_ctx.score * 0.4
+    vwap_score = max(-0.4, min(vwap_ctx.score * 0.4, 0.8))
 
     score += vwap_score
-
     components["vwap"] = round(vwap_score, 2)
 
     # ==================================================
@@ -112,7 +89,6 @@ def final_trade_decision(
     liq_score = min(1.0, liq.score * 0.4)
 
     score += liq_score
-
     components["liquidity"] = round(liq_score, 2)
 
     # ==================================================
