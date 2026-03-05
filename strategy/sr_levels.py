@@ -1,14 +1,5 @@
 # strategy/sr_levels.py
 
-"""
-Support & Resistance utilities for 5-minute trading.
-
-Balanced for:
-- intraday SR pullbacks
-- structural zones
-- reliable detection
-"""
-
 from typing import List, Dict, Optional, Tuple
 from statistics import mean
 
@@ -17,7 +8,7 @@ from statistics import mean
 # SIMPLE SR FALLBACK
 # =========================
 
-def compute_simple_sr(highs: List[float], lows: List[float], lookback: int = 180) -> Dict[str, float]:
+def compute_simple_sr(highs: List[float], lows: List[float], lookback: int = 180):
 
     highs = highs[-lookback:] if highs else []
     lows = lows[-lookback:] if lows else []
@@ -54,10 +45,10 @@ def _find_local_extrema(values: List[float], window: int = 5):
         left = values[i - half:i]
         right = values[i + 1:i + 1 + half]
 
-        if all(center >= x for x in left + right):
+        if center > max(left) and center >= max(right):
             maxima.append((i, center))
 
-        if all(center <= x for x in left + right):
+        if center < min(left) and center <= min(right):
             minima.append((i, center))
 
     return maxima, minima
@@ -134,8 +125,7 @@ def compute_sr_levels(
     resist_clusters = _cluster_levels(resistances, tol_pct=cluster_tol_pct)
     supp_clusters = _cluster_levels(supports, tol_pct=cluster_tol_pct)
 
-    supp_sorted = sorted(supp_clusters, key=lambda x: x["level"])[:max_levels]
-
+    supp_sorted = sorted(supp_clusters, key=lambda x: x["level"], reverse=True)[:max_levels]
     res_sorted = sorted(resist_clusters, key=lambda x: x["level"], reverse=True)[:max_levels]
 
     return {
@@ -167,7 +157,7 @@ def get_nearest_sr(
 
         lvl = s["level"]
 
-        dist = abs(price - lvl) / max(lvl, 1e-9)
+        dist = abs(price - lvl) / max(price, 1e-9)
 
         if dist < best_dist:
             best_dist = dist
@@ -182,7 +172,7 @@ def get_nearest_sr(
 
         lvl = r["level"]
 
-        dist = abs(lvl - price) / max(price, 1e-9)
+        dist = abs(price - lvl) / max(price, 1e-9)
 
         if dist < best_dist:
             best_dist = dist
@@ -197,55 +187,3 @@ def get_nearest_sr(
         return best
 
     return None
-
-
-# =========================
-# SR LOCATION SCORE
-# =========================
-
-def sr_location_score(
-    price: float,
-    nearest_sr: Optional[Dict],
-    direction: str,
-    proximity_threshold: float = 0.03
-):
-
-    if nearest_sr is None:
-        return 0.0
-
-    dist = nearest_sr.get("dist_pct")
-
-    if dist is None or dist > proximity_threshold:
-        return 0.0
-
-    closeness = (proximity_threshold - dist) / proximity_threshold
-
-    strength = float(nearest_sr.get("strength", 1))
-
-    strength_factor = min(1.6, 0.7 + 0.18 * strength)
-
-    sign = 0
-
-    typ = nearest_sr.get("type")
-
-    if direction == "LONG":
-
-        if typ == "support":
-            sign = 1
-
-        elif typ == "resistance":
-            sign = -1
-
-    elif direction == "SHORT":
-
-        if typ == "resistance":
-            sign = 1
-
-        elif typ == "support":
-            sign = -1
-
-    score = sign * closeness * strength_factor
-
-    score = max(min(score, 1.0), -1.0)
-
-    return round(score, 3)
