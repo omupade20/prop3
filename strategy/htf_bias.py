@@ -5,21 +5,13 @@ from typing import Optional, List
 from strategy.indicators import exponential_moving_average
 
 
-# ------------------------
-# HTF Bias Output
-# ------------------------
-
 @dataclass
 class HTFBias:
-    direction: str     # BULLISH | BEARISH | NEUTRAL
-    strength: float    # 0 – 10
-    label: str         # BULLISH_STRONG, BULLISH_WEAK, etc.
+    direction: str
+    strength: float
+    label: str
     comment: str
 
-
-# ------------------------
-# HTF Bias Logic
-# ------------------------
 
 def get_htf_bias(
     prices: List[float],
@@ -28,18 +20,6 @@ def get_htf_bias(
     long_period: int = 50,
     vwap_tolerance: float = 0.008
 ) -> HTFBias:
-
-    """
-    Compute higher timeframe directional bias.
-
-    Uses:
-    - EMA crossover
-    - structural strength
-    - VWAP context
-
-    Returns:
-    HTFBias(direction, strength, label, comment)
-    """
 
     if not prices:
         return HTFBias("NEUTRAL", 0.5, "NEUTRAL", "No price data")
@@ -77,10 +57,10 @@ def get_htf_bias(
     recent_slice = prices[-20:]
     recent_range = max(recent_slice) - min(recent_slice)
 
-    if recent_range <= 0:
-        base_strength = 1.0
-    else:
-        base_strength = min(abs(ema_diff) / recent_range * 8.0, 6.0)
+    # prevent instability
+    recent_range = max(recent_range, price * 0.002)
+
+    base_strength = min(abs(ema_diff) / recent_range * 8.0, 7.0)
 
     strength = base_strength
 
@@ -97,7 +77,7 @@ def get_htf_bias(
         past_ema_short = exponential_moving_average(past_prices, short_period)
         past_ema_long = exponential_moving_average(past_prices, long_period)
 
-        if past_ema_short and past_ema_long:
+        if past_ema_short is not None and past_ema_long is not None:
 
             past_diff = past_ema_short - past_ema_long
 
@@ -108,7 +88,7 @@ def get_htf_bias(
                 comment_parts.append("Trend persistence")
 
     # ------------------------
-    # VWAP Context
+    # VWAP context
     # ------------------------
 
     if vwap_value and vwap_value > 0:
@@ -161,4 +141,4 @@ def get_htf_bias(
         strength=strength,
         label=label,
         comment=" | ".join(comment_parts)
-    )
+    )s
