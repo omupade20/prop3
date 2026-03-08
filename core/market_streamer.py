@@ -6,7 +6,6 @@ import upstox_client
 from config.settings import ACCESS_TOKEN
 
 from strategy.scanner import MarketScanner
-from strategy.vwap_filter import VWAPCalculator
 from strategy.strategy_engine import StrategyEngine
 
 from execution.execution_engine import ExecutionEngine
@@ -24,11 +23,7 @@ with open("data/nifty500_keys.json", "r") as f:
 
 scanner = MarketScanner(max_len=600)
 
-vwap_calculators = {
-    inst: VWAPCalculator() for inst in INSTRUMENT_LIST
-}
-
-strategy_engine = StrategyEngine(scanner, vwap_calculators)
+strategy_engine = StrategyEngine(scanner)
 
 order_executor = OrderExecutor()
 trade_monitor = TradeMonitor()
@@ -45,9 +40,9 @@ execution_engine = ExecutionEngine(
 signals_today = {}
 last_bar_time = {}
 
-# ------------------------------
-# 5m builder state
-# ------------------------------
+# --------------------------------
+# 5m aggregation state
+# --------------------------------
 
 builder = defaultdict(lambda: {
     "bucket": None,
@@ -111,6 +106,7 @@ def start_market_streamer():
                 continue
 
             prev_ts = last_bar_time.get(inst_key)
+
             if prev_ts == ts:
                 continue
 
@@ -119,20 +115,22 @@ def start_market_streamer():
             dt = datetime.datetime.fromtimestamp(ts / 1000)
 
             # --------------------------------
-            # 5 minute bucket
+            # 5 minute bucket (timestamp)
             # --------------------------------
 
-            bucket = (dt.minute // 5)
+            bucket = int(ts / 1000 // 300)
 
             state = builder[inst_key]
 
             if state["bucket"] is None:
+
                 state["bucket"] = bucket
                 state["open"] = close
                 state["high"] = high
                 state["low"] = low
                 state["close"] = close
                 state["volume"] = volume
+
                 continue
 
             if bucket != state["bucket"]:
