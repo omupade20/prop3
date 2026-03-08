@@ -14,7 +14,7 @@ def detect_pullback_signal(
     closes: List[float],
     volumes: List[float],
     htf_direction: str,
-    max_proximity: float = 0.04,
+    max_proximity: float = 0.06,
     min_bars: int = 30
 ) -> Optional[Dict]:
 
@@ -57,7 +57,7 @@ def detect_pullback_signal(
     # HTF ALIGNMENT (soft)
     # ===============================
 
-    htf_score = 0
+    htf_score = 0.4
 
     if direction == "LONG" and htf_direction == "BULLISH":
         htf_score = 1.0
@@ -78,13 +78,12 @@ def detect_pullback_signal(
             return None
 
     # ===============================
-    # VOLATILITY
+    # VOLATILITY (NO HARD REJECTION)
     # ===============================
 
     volat_ctx = analyze_volatility(highs, lows, closes)
 
-    if volat_ctx.state == "LOW":
-        return None
+    volatility_score = 1.0 if volat_ctx.state == "NORMAL" else 0.6
 
     # ===============================
     # REJECTION
@@ -114,15 +113,15 @@ def detect_pullback_signal(
     volume_score = 0.6 if vol_ctx.score >= 0.3 else 0.2
 
     # ===============================
-    # STRUCTURE REACTION
+    # STRUCTURE REACTION (SOFTER)
     # ===============================
 
-    reaction_score = 0
+    reaction_score = 0.4
 
-    if direction == "LONG" and closes[-1] > closes[-3]:
+    if direction == "LONG" and closes[-1] > closes[-2]:
         reaction_score = 0.6
 
-    if direction == "SHORT" and closes[-1] < closes[-3]:
+    if direction == "SHORT" and closes[-1] < closes[-2]:
         reaction_score = 0.6
 
     # ===============================
@@ -152,7 +151,7 @@ def detect_pullback_signal(
 
         "volume": volume_score,
 
-        "volatility": 1.0 if volat_ctx.state == "NORMAL" else 0.6,
+        "volatility": volatility_score,
 
         "reaction": reaction_score
     }
@@ -163,10 +162,10 @@ def detect_pullback_signal(
     # CLASSIFICATION
     # ===============================
 
-    if total_score >= 4.8:
+    if total_score >= 4.6:
         signal = "CONFIRMED"
 
-    elif total_score >= 3.2:
+    elif total_score >= 3.0:
         signal = "POTENTIAL"
 
     else:
