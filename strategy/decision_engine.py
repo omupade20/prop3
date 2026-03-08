@@ -1,8 +1,7 @@
+# strategy/decision_engine.py
+
 from dataclasses import dataclass
 from typing import Optional, Dict
-
-from strategy.liquidity_filter import analyze_liquidity
-from strategy.vwap_filter import VWAPContext
 
 
 @dataclass
@@ -20,7 +19,6 @@ def final_trade_decision(
     volumes: list[float],
     market_regime: str,
     htf_bias_direction: str,
-    vwap_ctx: VWAPContext,
     pullback_signal: Optional[Dict],
 ) -> DecisionResult:
 
@@ -61,48 +59,27 @@ def final_trade_decision(
         return DecisionResult("IGNORE", 0.0, None, {}, "range regime")
 
     if market_regime == "TREND":
+
         score += 0.6
         components["regime"] = 0.6
 
     elif market_regime == "STRONG_TREND":
+
         score += 1.0
         components["regime"] = 1.0
 
     # ==================================================
-    # 4️⃣ VWAP CONTEXT (soft)
-    # ==================================================
-
-    vwap_score = max(-0.4, min(vwap_ctx.score * 0.4, 0.8))
-
-    score += vwap_score
-    components["vwap"] = round(vwap_score, 2)
-
-    # ==================================================
-    # 5️⃣ LIQUIDITY
-    # ==================================================
-
-    liq = analyze_liquidity(volumes)
-
-    if liq.score < 0:
-        return DecisionResult("IGNORE", 0.0, None, {}, "illiquid")
-
-    liq_score = min(1.0, liq.score * 0.4)
-
-    score += liq_score
-    components["liquidity"] = round(liq_score, 2)
-
-    # ==================================================
-    # 6️⃣ FINAL CLASSIFICATION
+    # 4️⃣ FINAL CLASSIFICATION
     # ==================================================
 
     score = round(score, 2)
 
-    if score >= 5.0:
+    if score >= 4.5:
 
         state = f"EXECUTE_{direction}"
         reason = "confirmed pullback"
 
-    elif score >= 3.8:
+    elif score >= 3.0:
 
         state = f"PREPARE_{direction}"
         reason = "developing pullback"
