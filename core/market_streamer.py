@@ -1,11 +1,12 @@
+# core/market_streamer.py
+
 import json
 import datetime
-from collections import defaultdict
-
 import upstox_client
 from config.settings import ACCESS_TOKEN
 
 from strategy.scanner import MarketScanner
+from strategy.vwap_filter import VWAPCalculator
 from strategy.strategy_engine import StrategyEngine
 
 from execution.execution_engine import ExecutionEngine
@@ -17,13 +18,15 @@ from execution.trade_logger import TradeLogger
 
 FEED_MODE = "full"
 
+# ---------------- LOAD UNIVERSE ----------------
 with open("data/nifty500_keys.json", "r") as f:
     INSTRUMENT_LIST = json.load(f)
 
-
+# ---------------- CORE OBJECTS ----------------
 scanner = MarketScanner(max_len=600)
+vwap_calculators = {inst: VWAPCalculator() for inst in INSTRUMENT_LIST}
 
-strategy_engine = StrategyEngine(scanner)
+strategy_engine = StrategyEngine(scanner, vwap_calculators)
 
 order_executor = OrderExecutor()
 trade_monitor = TradeMonitor()
@@ -38,23 +41,12 @@ execution_engine = ExecutionEngine(
 )
 
 signals_today = {}
-last_bar_time = {}
-
-# --------------------------------
-# 5m aggregation state
-# --------------------------------
-
-builder = defaultdict(lambda: {
-    "bucket": None,
-    "open": None,
-    "high": None,
-    "low": None,
-    "close": None,
-    "volume": 0
-})
+ALLOW_NEW_TRADES = True
 
 
+# ---------------- STREAMER ----------------
 def start_market_streamer():
+    global ALLOW_NEW_TRADES
 
     config = upstox_client.Configuration()
     config.access_token = ACCESS_TOKEN
@@ -67,9 +59,9 @@ def start_market_streamer():
     )
 
     def on_message(message):
+        global ALLOW_NEW_TRADES
 
         feeds = message.get("feeds", {})
-
         now = datetime.datetime.now()
         today = now.date().isoformat()
 
@@ -79,7 +71,6 @@ def start_market_streamer():
         current_prices = {}
 
         for inst_key, feed_info in feeds.items():
-
             data = feed_info.get("fullFeed", {}).get("marketFF", {})
 
             try:
@@ -90,97 +81,38 @@ def start_market_streamer():
             current_prices[inst_key] = ltp
 
             ohlc = data.get("marketOHLC", {}).get("ohlc", [])
-
             if not ohlc:
                 continue
 
             bar = ohlc[-1]
-
             try:
                 high = float(bar["high"])
                 low = float(bar["low"])
                 close = float(bar["close"])
                 volume = float(bar["vol"])
-                ts = bar["ts"]
             except Exception:
                 continue
 
-            prev_ts = last_bar_time.get(inst_key)
+            # ---- Update Market State ----
+            scanner.update(inst_key, ltp, high, low, close, volume)
 
-            if prev_ts == ts:
+            # ---- Strategy Evaluation ----
+            decision = strategy_engine.evaluate(inst_key, ltp)
+
+            if not decision:
                 continue
 
-            last_bar_time[inst_key] = ts
+            if decision.state.startswith("EXECUTE"):
+                if inst_key in signals_today[today]:
+                    continue
 
-            dt = datetime.datetime.fromtimestamp(ts / 1000)
+                signals_today[today].add(inst_key)
+                execution_engine.handle_entry(inst_key, decision, ltp)
 
-            # --------------------------------
-            # 5 minute bucket (timestamp)
-            # --------------------------------
-
-            bucket = int(ts / 1000 // 300)
-
-            state = builder[inst_key]
-
-            if state["bucket"] is None:
-
-                state["bucket"] = bucket
-                state["open"] = close
-                state["high"] = high
-                state["low"] = low
-                state["close"] = close
-                state["volume"] = volume
-
-                continue
-
-            if bucket != state["bucket"]:
-
-                bar_time = dt.replace(second=0, microsecond=0)
-
-                scanner.append_ohlc_bar(
-                    inst_key,
-                    bar_time.isoformat(),
-                    state["open"],
-                    state["high"],
-                    state["low"],
-                    state["close"],
-                    state["volume"]
-                )
-
-                decision = strategy_engine.evaluate(inst_key, ltp)
-
-                if decision and decision.state.startswith("EXECUTE"):
-
-                    if inst_key not in signals_today[today]:
-
-                        signals_today[today].add(inst_key)
-
-                        execution_engine.handle_entry(
-                            inst_key,
-                            decision,
-                            ltp
-                        )
-
-                # reset builder
-
-                state["bucket"] = bucket
-                state["open"] = close
-                state["high"] = high
-                state["low"] = low
-                state["close"] = close
-                state["volume"] = volume
-
-            else:
-
-                state["high"] = max(state["high"], high)
-                state["low"] = min(state["low"], low)
-                state["close"] = close
-                state["volume"] += volume
-
+        # ---- Exit Handling ----
         execution_engine.handle_exits(current_prices, now)
 
     streamer.on("message", on_message)
-
     streamer.connect()
 
-    print("🚀 5-Minute Pullback Trading System LIVE")
+    print("🚀 Elite intraday trading system started (refactored & stable)")
